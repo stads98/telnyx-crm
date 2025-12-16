@@ -520,6 +520,18 @@ class TelnyxWebRTCClient {
         // Store as pending inbound - we'll match it with the call object
         this.pendingInboundCallId = callId
         this.pendingInboundInfo = { callerNumber, callerName, destinationNumber }
+
+        // If we already have an inbound call (callUpdate arrived first), emit update with destination number
+        if (this.inboundCall && destinationNumber) {
+          const inboundCallId = this.inboundCall.callId || this.inboundCall.id
+          console.log("[RTC] 📞 Emitting inboundCallUpdate with destinationNumber:", destinationNumber)
+          this.emit("inboundCallUpdate", {
+            callId: inboundCallId,
+            destinationNumber: destinationNumber,
+            callerNumber: callerNumber,
+            callerName: callerName
+          })
+        }
       }
     })
 
@@ -938,6 +950,13 @@ class TelnyxWebRTCClient {
     // Move inbound call to current call
     this.currentCall = this.inboundCall
     this.inboundCall = null
+
+    // Also add to activeCalls map so hangup(sessionId) can find it
+    const callId = this.currentCall?.callId || this.currentCall?.id
+    if (callId && this.currentCall) {
+      this.activeCalls.set(callId, this.currentCall)
+      console.log('[RTC] Added answered inbound call to activeCalls:', callId)
+    }
 
     // Emit inboundCallEnded so the notification UI can dismiss
     this.emit("inboundCallEnded", { answered: true })

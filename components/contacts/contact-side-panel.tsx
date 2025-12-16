@@ -1,12 +1,13 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { X, Phone, Mail, Building2, Calendar, Tag, MessageSquare, PhoneCall, FileText, CheckSquare, User, Plus, Save, Loader2, Trash2, ChevronDown, ChevronUp, Edit2, Check, Cloud, CloudOff, GripHorizontal, Minimize2, Maximize2, Pin, PinOff } from "lucide-react"
+import { X, Phone, Mail, Building2, Calendar, Tag, MessageSquare, PhoneCall, FileText, CheckSquare, User, Plus, Loader2, Trash2, Edit2, Cloud, CloudOff, GripHorizontal, Minimize2, Maximize2, Pin, PinOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -22,8 +23,17 @@ import Link from "next/link"
 import { TagInput } from "@/components/ui/tag-input"
 import { toast } from "sonner"
 import ContactSequences from "./contact-sequences"
-import { formatPhoneNumberForTelnyx, formatPhoneNumberForDisplay } from "@/lib/phone-utils"
-import { normalizePropertyType, getStandardPropertyTypes } from "@/lib/property-type-mapper"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { normalizePropertyType } from "@/lib/property-type-mapper"
 import { CallButtonWithCellHover } from "@/components/ui/call-button-with-cell-hover"
 import { AddressAutocomplete, type AddressComponents } from "@/components/ui/address-autocomplete"
 
@@ -129,8 +139,21 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
   const [editingTaskData, setEditingTaskData] = useState<Partial<Task>>({})
 
+  // Follow-up task dialog state
+  const [showFollowUpDialog, setShowFollowUpDialog] = useState(false)
+  const [completedTask, setCompletedTask] = useState<Task | null>(null)
+  const [followUpSubject, setFollowUpSubject] = useState('')
+  const [followUpDueDate, setFollowUpDueDate] = useState('')
+  const [creatingFollowUp, setCreatingFollowUp] = useState(false)
+
   // Expanded activity items for long descriptions
   const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(new Set())
+
+  // Note creation/editing state
+  const [newNote, setNewNote] = useState('')
+  const [savingNote, setSavingNote] = useState(false)
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null)
+  const [editingNoteText, setEditingNoteText] = useState('')
 
   // Dragging state for non-modal floating panel
   const [isMinimized, setIsMinimized] = useState(false)
@@ -593,10 +616,22 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
 
       if (res.ok) {
         // Update local state
+        const task = tasks.find(t => t.id === taskId)
         setTasks(prev => prev.map(t =>
           t.id === taskId ? { ...t, status: completed ? 'completed' : 'open' } : t
         ))
         toast.success(completed ? 'Task completed!' : 'Task reopened')
+
+        // If completing a task, show follow-up dialog
+        if (completed && task) {
+          setCompletedTask(task)
+          setFollowUpSubject(`Follow up: ${task.subject}`)
+          // Default to 7 days from now
+          const followUpDate = new Date()
+          followUpDate.setDate(followUpDate.getDate() + 7)
+          setFollowUpDueDate(followUpDate.toISOString().split('T')[0])
+          setShowFollowUpDialog(true)
+        }
       } else {
         toast.error('Failed to update task')
       }
@@ -604,6 +639,62 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
       console.error('Failed to update task:', error)
       toast.error('Failed to update task')
     }
+  }
+
+  // Create follow-up task
+  const handleCreateFollowUp = async () => {
+    if (!currentContact || !followUpSubject.trim()) return
+
+    setCreatingFollowUp(true)
+    try {
+      const res = await fetch('/api/activities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'task',
+          taskType: completedTask?.taskType || 'Follow Up',
+          subject: followUpSubject.trim(),
+          description: '',
+          priority: 'low', // Default follow-up tasks to low priority
+          status: 'planned',
+          dueDate: followUpDueDate ? new Date(followUpDueDate).toISOString() : undefined,
+          contactId: currentContact.id,
+        }),
+      })
+
+      if (res.ok) {
+        const newTask = await res.json()
+        setTasks(prev => [...prev, {
+          id: newTask.id,
+          subject: newTask.subject,
+          description: newTask.description,
+          status: newTask.status,
+          priority: newTask.priority,
+          dueDate: newTask.dueDate,
+          taskType: newTask.taskType,
+        }])
+        toast.success('Follow-up task created!')
+        setShowFollowUpDialog(false)
+        setCompletedTask(null)
+        setFollowUpSubject('')
+        setFollowUpDueDate('')
+      } else {
+        toast.error('Failed to create follow-up task')
+      }
+    } catch (error) {
+      console.error('Failed to create follow-up task:', error)
+      toast.error('Failed to create follow-up task')
+    } finally {
+      setCreatingFollowUp(false)
+    }
+  }
+
+  // Skip follow-up task
+  const handleSkipFollowUp = () => {
+    setShowFollowUpDialog(false)
+    setCompletedTask(null)
+    setFollowUpSubject('')
+    setFollowUpDueDate('')
   }
 
   // Start editing a task
@@ -653,7 +744,14 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
   const handleCreateTask = () => {
     if (!currentContact) return
     openTask({
-      contact: currentContact,
+      contact: {
+        id: currentContact.id,
+        firstName: currentContact.firstName,
+        lastName: currentContact.lastName,
+        email1: currentContact.email1 || undefined,
+        phone1: currentContact.phone1 || undefined,
+        propertyAddress: currentContact.propertyAddress || undefined,
+      },
       contactId: currentContact.id,
     })
   }
@@ -679,6 +777,68 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
       console.error('Failed to load activities:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleSaveNote = async () => {
+    if (!contact?.id || !newNote.trim()) return
+    setSavingNote(true)
+    try {
+      const res = await fetch('/api/activities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contactId: contact.id,
+          type: 'note',
+          title: 'Note',
+          description: newNote.trim(),
+          status: 'completed',
+        }),
+      })
+      if (res.ok) {
+        toast.success('Note saved')
+        setNewNote('')
+        // Refresh activity history
+        loadActivities()
+        // Emit event to notify other components
+        window.dispatchEvent(new CustomEvent('activity-created', {
+          detail: { contactId: contact.id }
+        }))
+      } else {
+        toast.error('Failed to save note')
+      }
+    } catch (error) {
+      console.error('Failed to save note:', error)
+      toast.error('Failed to save note')
+    } finally {
+      setSavingNote(false)
+    }
+  }
+
+  const handleEditNote = async (activityId: string) => {
+    if (!editingNoteText.trim()) return
+    setSavingNote(true)
+    try {
+      const res = await fetch(`/api/activities/${activityId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          description: editingNoteText.trim(),
+        }),
+      })
+      if (res.ok) {
+        toast.success('Note updated')
+        setEditingNoteId(null)
+        setEditingNoteText('')
+        loadActivities()
+      } else {
+        toast.error('Failed to update note')
+      }
+    } catch (error) {
+      console.error('Failed to update note:', error)
+      toast.error('Failed to update note')
+    } finally {
+      setSavingNote(false)
     }
   }
 
@@ -776,7 +936,6 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
 
   // Split tasks into open and completed
   const openTasks = tasks.filter(t => t.status !== 'completed')
-  const completedTasks = tasks.filter(t => t.status === 'completed')
 
   const getActivityIcon = (type: string, direction?: string) => {
     switch (type) {
@@ -892,10 +1051,75 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
         {/* Left Column - Activity History (always visible) */}
         <div className="w-[340px] border-r bg-gray-50/50 flex flex-col">
           <div className="p-3 border-b bg-white">
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
-              <Calendar className="h-3.5 w-3.5" />
-              Activity History ({activityHistory.length})
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
+                <Calendar className="h-3.5 w-3.5" />
+                Activity History ({activityHistory.length})
+              </h3>
+              {activityHistory.some(item => item.description && (item.description.length > 50 || item.description.includes('\n'))) && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] text-blue-600 hover:text-blue-700 p-1"
+                  onClick={() => {
+                    const expandableIds = activityHistory
+                      .filter(item => item.description && (item.description.length > 50 || item.description.includes('\n')))
+                      .map(item => item.id)
+                    if (expandedActivityIds.size === expandableIds.length) {
+                      // All expanded, collapse all
+                      setExpandedActivityIds(new Set())
+                    } else {
+                      // Expand all
+                      setExpandedActivityIds(new Set(expandableIds))
+                    }
+                  }}
+                >
+                  {expandedActivityIds.size > 0 ? 'Collapse All' : 'Expand All'}
+                </Button>
+              )}
+            </div>
+          </div>
+          {/* Add Note Input (multi-line) */}
+          <div className="p-3 border-b bg-white">
+            <div className="space-y-2">
+              <Textarea
+                placeholder="Add a note... use '-' for bullet points"
+                value={newNote}
+                onChange={(e) => setNewNote(e.target.value)}
+                rows={3}
+                className="text-sm resize-y"
+                disabled={savingNote}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && newNote.trim()) {
+                    e.preventDefault()
+                    handleSaveNote()
+                  }
+                }}
+              />
+              <div className="flex justify-end gap-2">
+                {newNote && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-3 text-xs"
+                    onClick={() => setNewNote('')}
+                    disabled={savingNote}
+                  >
+                    Clear
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-7 px-3 text-xs"
+                  onClick={handleSaveNote}
+                  disabled={savingNote || !newNote.trim()}
+                >
+                  {savingNote ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Add note'}
+                </Button>
+              </div>
+            </div>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-3">
@@ -969,6 +1193,20 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                   {item.isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
                                 </button>
                               )}
+                              {/* Edit button for notes */}
+                              {item.activityId && item.metadata?.activityType === 'note' && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setEditingNoteId(item.activityId!)
+                                    setEditingNoteText(item.description || '')
+                                  }}
+                                  className="p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600"
+                                  title="Edit note"
+                                >
+                                  <Edit2 className="h-3 w-3" />
+                                </button>
+                              )}
                               <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
                                 item.type === 'call' ? 'bg-blue-50 text-blue-700 border-blue-200' :
                                 item.type === 'sms' ? 'bg-green-50 text-green-700 border-green-200' :
@@ -976,7 +1214,7 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                 item.type === 'sequence' ? 'bg-orange-50 text-orange-700 border-orange-200' :
                                 item.type === 'tag_added' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
                                 item.type === 'tag_removed' ? 'bg-red-50 text-red-700 border-red-200' :
-                                item.type === 'note' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
+                                item.metadata?.activityType === 'note' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
                                 item.type === 'task' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
                                 'bg-gray-50 text-gray-700 border-gray-200'
                               }`}>
@@ -988,7 +1226,56 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                           </div>
                           {item.description && (
                             <div className="mt-1">
-                              {expandedActivityIds.has(item.id) ? (
+                              {editingNoteId === item.activityId && item.metadata?.activityType === 'note' ? (
+                                <div className="space-y-1">
+                                  <Textarea
+                                    value={editingNoteText}
+                                    onChange={(e) => setEditingNoteText(e.target.value)}
+                                    rows={3}
+                                    className="text-xs resize-y"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && editingNoteText.trim()) {
+                                        e.preventDefault()
+                                        handleEditNote(item.activityId!)
+                                      }
+                                      if (e.key === 'Escape') {
+                                        e.preventDefault()
+                                        setEditingNoteId(null)
+                                        setEditingNoteText('')
+                                      }
+                                    }}
+                                  />
+                                  <div className="flex justify-end gap-2">
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 px-2 text-[10px]"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setEditingNoteId(null)
+                                        setEditingNoteText('')
+                                      }}
+                                      disabled={savingNote}
+                                    >
+                                      Cancel
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      className="h-6 px-2 text-[10px]"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleEditNote(item.activityId!)
+                                      }}
+                                      disabled={savingNote || !editingNoteText.trim()}
+                                    >
+                                      {savingNote ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : expandedActivityIds.has(item.id) ? (
                                 <div>
                                   <p className="text-xs text-gray-600 whitespace-pre-wrap">{item.description}</p>
                                   <button
@@ -1511,6 +1798,45 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
           </div>
         </ScrollArea>
       </div>
+
+      {/* Follow-up Task Dialog */}
+      <AlertDialog open={showFollowUpDialog} onOpenChange={setShowFollowUpDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Create Follow-up Task?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Would you like to create a follow-up task for this contact?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="followup-subject">Task Subject</Label>
+              <Input
+                id="followup-subject"
+                value={followUpSubject}
+                onChange={(e) => setFollowUpSubject(e.target.value)}
+                placeholder="Enter task subject..."
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="followup-date">Due Date</Label>
+              <Input
+                id="followup-date"
+                type="date"
+                value={followUpDueDate}
+                onChange={(e) => setFollowUpDueDate(e.target.value)}
+              />
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleSkipFollowUp}>Skip</AlertDialogCancel>
+            <AlertDialogAction onClick={handleCreateFollowUp} disabled={creatingFollowUp || !followUpSubject.trim()}>
+              {creatingFollowUp ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Create Task
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

@@ -62,6 +62,17 @@ export async function GET(request: NextRequest) {
             lastName: true,
           },
         },
+        activity_tags: {
+          include: {
+            tag: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
+          },
+        },
       },
       orderBy: [
         { due_date: 'asc' },
@@ -98,6 +109,11 @@ export async function GET(request: NextRequest) {
         ? `${activity.createdBy.firstName} ${activity.createdBy.lastName || ''}`.trim()
         : '',
       createdAt: activity.created_at.toISOString(),
+      tags: activity.activity_tags.map((at) => ({
+        id: at.tag.id,
+        name: at.tag.name,
+        color: at.tag.color,
+      })),
     }));
 
     return NextResponse.json({ tasks });

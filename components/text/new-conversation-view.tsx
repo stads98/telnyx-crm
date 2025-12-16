@@ -5,11 +5,9 @@ import { useSession } from "next-auth/react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ArrowLeft, Send, Phone, User, Loader2, X, FileText } from "lucide-react"
+import { ArrowLeft, Send, Loader2, X, FileText } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { useContacts } from "@/lib/context/contacts-context"
 import { formatPhoneNumberForDisplay } from "@/lib/phone-utils"
@@ -42,7 +40,7 @@ interface NewConversationViewProps {
 
 export default function NewConversationView({ onBack, onConversationStarted }: NewConversationViewProps) {
   const { data: session } = useSession()
-  const { contacts, searchContacts } = useContacts()
+  const { allContacts, loadAllContacts } = useContacts()
   const { toast } = useToast()
   
   const [phoneInput, setPhoneInput] = useState("")
@@ -88,8 +86,8 @@ export default function NewConversationView({ onBack, onConversationStarted }: N
       content = content.replace(/\{firstName\}/gi, selectedContact.firstName || '')
       content = content.replace(/\{lastName\}/gi, selectedContact.lastName || '')
       content = content.replace(/\{propertyAddress\}/gi, selectedContact.propertyAddress || '')
-      content = content.replace(/\{city\}/gi, selectedContact.city || selectedContact.propertyCity || '')
-      content = content.replace(/\{state\}/gi, selectedContact.state || selectedContact.propertyState || '')
+      content = content.replace(/\{city\}/gi, selectedContact.city || '')
+      content = content.replace(/\{state\}/gi, selectedContact.state || '')
     }
 
     setMessage(content)
@@ -106,9 +104,12 @@ export default function NewConversationView({ onBack, onConversationStarted }: N
         const res = await fetch('/api/telnyx/phone-numbers')
         if (res.ok) {
           const data = await res.json()
-          const numbers = (data.phoneNumbers || []).filter((n: TelnyxPhoneNumber) => n.isActive)
+          // API returns array directly OR { phoneNumbers: [...] }
+          const rawNumbers = Array.isArray(data) ? data : (data.phoneNumbers || [])
+          const numbers = rawNumbers.filter((n: TelnyxPhoneNumber) => n.isActive)
+          console.log('[NewConversation] Loaded phone numbers:', numbers.length)
           setAvailableNumbers(numbers)
-          
+
           // Auto-select assigned number for team users, or first number for admins
           if (!isAdmin && session?.user?.assignedPhoneNumber) {
             setSelectedSenderNumber(session.user.assignedPhoneNumber)
@@ -123,6 +124,11 @@ export default function NewConversationView({ onBack, onConversationStarted }: N
     loadNumbers()
   }, [session, isAdmin])
 
+  // Load all contacts on mount for instant search
+  useEffect(() => {
+    loadAllContacts()
+  }, [loadAllContacts])
+
   // Search contacts as user types
   useEffect(() => {
     if (!phoneInput.trim()) {
@@ -131,11 +137,20 @@ export default function NewConversationView({ onBack, onConversationStarted }: N
       return
     }
 
-    // Search by phone number or name
-    const results = searchContacts(phoneInput).slice(0, 5)
+    // Search by phone number or name in cached allContacts
+    const query = phoneInput.toLowerCase()
+    const results = allContacts
+      .filter(c =>
+        c.firstName?.toLowerCase().includes(query) ||
+        c.lastName?.toLowerCase().includes(query) ||
+        c.phone1?.includes(phoneInput) ||
+        c.phone2?.includes(phoneInput) ||
+        c.phone3?.includes(phoneInput)
+      )
+      .slice(0, 5)
     setMatchingContacts(results)
     setShowSuggestions(results.length > 0 && !selectedContact)
-  }, [phoneInput, searchContacts, selectedContact])
+  }, [phoneInput, allContacts, selectedContact])
 
   const handleSelectContact = (contact: Contact) => {
     setSelectedContact(contact)

@@ -5,18 +5,14 @@ import { prisma } from '@/lib/prisma';
 
 export async function GET(request: NextRequest) {
   try {
-    // Get or create a default user
-    let user = await prisma.user.findFirst({
-      select: { id: true, adminId: true },
-    });
-
-    // If no users exist, return empty array (will be created on first POST)
-    if (!user) {
-      return NextResponse.json({ taskTypes: [] });
+    // Get the authenticated user's session
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Get admin user (or self if admin)
-    const adminId = user.adminId || user.id;
+    // Get admin user ID (for team users, use their admin's settings)
+    const adminId = session.user.adminId || session.user.id;
 
     // Get task types from user settings
     const settings = await prisma.userSettings.findUnique({

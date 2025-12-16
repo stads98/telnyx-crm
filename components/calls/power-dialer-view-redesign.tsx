@@ -1192,17 +1192,33 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
               }
 
               if (status.status === 'voicemail') {
-                // VOICEMAIL DETECTED - Return contact to bottom of queue, don't add to session history
-                console.log('[PowerDialer AMD] 📵 VOICEMAIL detected for', contact.firstName, '- returning to bottom of queue')
+                // VOICEMAIL DETECTED - Treat as No Answer and return to queue
+                console.log('[PowerDialer AMD] 📵 VOICEMAIL detected for', contact.firstName, '- treating as No Answer - Voicemail Detected')
 
-                // DON'T add to session history - user didn't actually speak to them
-                // Just skip it entirely per user request
+                // Find "No Answer" disposition or create a virtual one
+                const noAnswerDispo = dispositions.find(d =>
+                  d.name.toLowerCase().includes('no answer') ||
+                  d.name.toLowerCase().includes('retry')
+                )
+
+                // ADD to session history as "No Answer - Voicemail Detected" so user can see it happened
+                const historyEntry: SessionHistoryEntry = {
+                  id: `${Date.now()}-${contact.id}-voicemail`,
+                  contact,
+                  calledAt: new Date(),
+                  dispositionId: noAnswerDispo?.id || 'voicemail',
+                  dispositionName: 'No Answer - Voicemail Detected',
+                  dispositionColor: noAnswerDispo?.color || '#6b7280',
+                  notes: 'AMD detected voicemail',
+                  callerIdNumber: line?.callerIdNumber
+                }
+                setSessionHistory(prevHistory => [historyEntry, ...prevHistory])
 
                 // Clear the line
-                setCallLines(prev => prev.map((line, idx) =>
-                  idx === lineIdx && line.callControlId === callControlId
-                    ? { ...line, contact: null, status: 'idle' as const, callControlId: undefined, amdResult: 'machine' }
-                    : line
+                setCallLines(prev => prev.map((l, idx) =>
+                  idx === lineIdx && l.callControlId === callControlId
+                    ? { ...l, contact: null, status: 'idle' as const, callControlId: undefined, amdResult: 'machine' }
+                    : l
                 ))
 
                 // MOVE CONTACT TO BOTTOM OF QUEUE (not just keep in place)

@@ -134,3 +134,10 @@ export function formatPhoneNumbersForTelnyx(phoneNumbers: (string | null | undef
     .map(formatPhoneNumberForTelnyx)
     .filter((phone): phone is string => phone !== null && isValidE164PhoneNumber(phone));
 }
+
+/**
+ * Alias for formatPhoneNumberForTelnyx - formats phone to E.164 format
+ * @param phoneNumber - Raw phone number
+ * @returns Formatted phone number in E.164 format or null if invalid
+ */
+export const formatPhoneToE164 = formatPhoneNumberForTelnyx;

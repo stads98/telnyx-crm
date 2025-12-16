@@ -18,6 +18,7 @@ export interface ManualDialerCall {
   telnyxCall?: any              // Reference to Telnyx SDK call object
   amdEnabled?: boolean          // Whether AMD is active for this call
   callControlId?: string        // Telnyx Call Control ID (for AMD calls)
+  webrtcSessionId?: string      // WebRTC session ID (for transferred AMD calls)
 }
 
 const MAX_CONCURRENT = 8
@@ -202,6 +203,41 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
             console.log('[MultiCall] AMD status:', statusData.status)
 
             if (statusData.status === 'human_detected') {
+              // Human detected - the call will be transferred to WebRTC
+              // Listen for incoming WebRTC call to get the call reference
+              console.log('[MultiCall] Human detected, waiting for WebRTC transfer...')
+
+              const handleTransferredCall = (info: { callId: string; call: any; callerNumber?: string }) => {
+                console.log('[MultiCall] Received transferred call:', info.callId, 'for AMD call:', callControlId)
+
+                // Update the call entry with WebRTC call reference
+                setActiveCalls(prev => {
+                  const newMap = new Map(prev)
+                  const existingCall = newMap.get(callControlId)
+                  if (existingCall) {
+                    // Store the WebRTC call reference and session ID
+                    newMap.set(callControlId, {
+                      ...existingCall,
+                      telnyxCall: info.call,
+                      webrtcSessionId: info.callId,
+                    })
+                    console.log('[MultiCall] Updated AMD call with WebRTC reference:', callControlId, '->', info.callId)
+                  }
+                  return newMap
+                })
+
+                // Remove the listener
+                rtcClient.off('inboundCall', handleTransferredCall)
+              }
+
+              // Listen for the incoming WebRTC call (from transfer)
+              rtcClient.on('inboundCall', handleTransferredCall)
+
+              // Timeout to remove listener after 10 seconds if no transfer
+              setTimeout(() => {
+                rtcClient.off('inboundCall', handleTransferredCall)
+              }, 10000)
+
               handleCallAnswered(callControlId)
               return
             } else if (['machine_detected', 'voicemail', 'no_answer', 'failed', 'hangup'].includes(statusData.status)) {
@@ -394,20 +430,41 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
     const call = activeCallsRef.current.get(callId)
     if (!call) return
 
-    console.log('[MultiCall] Hanging up call:', callId, 'callControlId:', call.callControlId, 'hasTelnyxCall:', !!call.telnyxCall)
+    console.log('[MultiCall] Hanging up call:', callId, {
+      callControlId: call.callControlId,
+      webrtcSessionId: call.webrtcSessionId,
+      hasTelnyxCall: !!call.telnyxCall,
+      amdEnabled: call.amdEnabled
+    })
 
-    // Try WebRTC SDK hangup first
+    let hangupSuccessful = false
+
+    // Try WebRTC SDK hangup first (using the call object reference)
     if (call.telnyxCall) {
       try {
         call.telnyxCall.hangup()
-        console.log('[MultiCall] WebRTC hangup successful')
+        console.log('[MultiCall] WebRTC hangup via call object successful')
+        hangupSuccessful = true
       } catch (e) {
-        console.error('[MultiCall] WebRTC hangup error:', e)
+        console.error('[MultiCall] WebRTC hangup via call object error:', e)
       }
     }
 
-    // Also try server-side Call Control API hangup (for AMD calls or as backup)
-    if (call.callControlId) {
+    // For AMD calls that were transferred: try rtcClient.hangup() with the WebRTC session ID
+    if (!hangupSuccessful && call.webrtcSessionId) {
+      try {
+        const { rtcClient } = await import('@/lib/webrtc/rtc-client')
+        console.log('[MultiCall] Trying rtcClient.hangup() with webrtcSessionId:', call.webrtcSessionId)
+        await rtcClient.hangup(call.webrtcSessionId)
+        console.log('[MultiCall] rtcClient.hangup() successful for webrtcSessionId:', call.webrtcSessionId)
+        hangupSuccessful = true
+      } catch (e) {
+        console.error('[MultiCall] rtcClient.hangup() error:', e)
+      }
+    }
+
+    // Fallback: Try server-side Call Control API hangup (for original PSTN leg)
+    if (!hangupSuccessful && call.callControlId) {
       try {
         console.log('[MultiCall] Calling server-side hangup for callControlId:', call.callControlId)
         const response = await fetch('/api/telnyx/calls/hangup', {
@@ -417,11 +474,24 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
         })
         if (response.ok) {
           console.log('[MultiCall] Server-side hangup successful')
+          hangupSuccessful = true
         } else {
           console.error('[MultiCall] Server-side hangup failed:', await response.text())
         }
       } catch (e) {
         console.error('[MultiCall] Server-side hangup error:', e)
+      }
+    }
+
+    // Last resort: Try rtcClient.hangup() without a specific session
+    if (!hangupSuccessful) {
+      try {
+        const { rtcClient } = await import('@/lib/webrtc/rtc-client')
+        console.log('[MultiCall] Last resort: trying rtcClient.hangup() for current call')
+        await rtcClient.hangup()
+        console.log('[MultiCall] Last resort rtcClient.hangup() completed')
+      } catch (e) {
+        console.error('[MultiCall] Last resort hangup error:', e)
       }
     }
 

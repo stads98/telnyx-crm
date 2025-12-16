@@ -273,7 +273,7 @@ export default function ContactsDataGrid({
   const [showBulkTaskDialog, setShowBulkTaskDialog] = useState(false);
   const [bulkTaskData, setBulkTaskData] = useState({
     title: '',
-    type: 'Call',
+    type: 'Dan Task',
     dueDate: undefined as Date | undefined,
     notes: '',
   });
@@ -868,7 +868,7 @@ export default function ContactsDataGrid({
 
       toast.success(`Created ${result.count} tasks for ${selectedRows.length} contacts`);
       setShowBulkTaskDialog(false);
-      setBulkTaskData({ title: '', type: 'Call', dueDate: undefined, notes: '' });
+      setBulkTaskData({ title: '', type: savedTaskTypes[0] || 'Dan Task', dueDate: undefined, notes: '' });
       setRowSelection({}); // Clear selection after operation
     } catch (error) {
       console.error('Bulk task creation error:', error);
@@ -2809,10 +2809,13 @@ export default function ContactsDataGrid({
             <div className="space-y-2">
               <Label>Task Title *</Label>
               <Input
-                placeholder="e.g., Follow up call, Send proposal..."
+                placeholder="e.g., Follow up with {{firstName}} about {{propertyAddress}}..."
                 value={bulkTaskData.title}
                 onChange={(e) => setBulkTaskData({ ...bulkTaskData, title: e.target.value })}
               />
+              <p className="text-xs text-muted-foreground">
+                Use dynamic fields: {'{{firstName}}'}, {'{{lastName}}'}, {'{{propertyAddress}}'}, {'{{city}}'}, {'{{state}}'}
+              </p>
             </div>
             <div className="space-y-2">
               <Label>Task Type</Label>
@@ -2824,18 +2827,25 @@ export default function ContactsDataGrid({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="Call">Call</SelectItem>
-                  <SelectItem value="Email">Email</SelectItem>
-                  <SelectItem value="Meeting">Meeting</SelectItem>
-                  <SelectItem value="Follow-up">Follow-up</SelectItem>
-                  <SelectItem value="Task">Task</SelectItem>
-                  <SelectItem value="Note">Note</SelectItem>
+                  {savedTaskTypes.length > 0 ? (
+                    savedTaskTypes.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <>
+                      <SelectItem value="Dan Task">Dan Task</SelectItem>
+                      <SelectItem value="Joe Task">Joe Task</SelectItem>
+                      <SelectItem value="Edwin Task">Edwin Task</SelectItem>
+                    </>
+                  )}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
               <Label>Due Date</Label>
-              <Popover>
+              <Popover modal={true}>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
@@ -2848,7 +2858,7 @@ export default function ContactsDataGrid({
                     {bulkTaskData.dueDate ? format(bulkTaskData.dueDate, 'PPP') : 'Pick a date'}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
+                <PopoverContent className="w-auto p-0 z-[10000]" align="start" sideOffset={5} side="bottom">
                   <Calendar
                     mode="single"
                     selected={bulkTaskData.dueDate}
@@ -2873,7 +2883,7 @@ export default function ContactsDataGrid({
               variant="outline"
               onClick={() => {
                 setShowBulkTaskDialog(false);
-                setBulkTaskData({ title: '', type: 'Call', dueDate: undefined, notes: '' });
+                setBulkTaskData({ title: '', type: savedTaskTypes[0] || 'Dan Task', dueDate: undefined, notes: '' });
               }}
             >
               Cancel

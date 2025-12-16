@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Search, Plus, MessageCircle, Phone, Filter, Calendar, X, ClipboardList, CheckSquare } from "lucide-react"
+import { Search, Plus, MessageCircle, Phone, Filter, Calendar, X, ClipboardList, CheckSquare, Trash2, Tag } from "lucide-react"
 import { useDebounce } from "@/hooks/use-debounce"
 import { formatDistanceToNow } from "date-fns"
 import { useToast } from "@/hooks/use-toast"
@@ -37,6 +37,17 @@ import { Textarea } from "@/components/ui/textarea"
 import NewTextMessageModal from "./new-text-message-modal"
 import type { Contact } from "@/lib/types"
 import ContactName from "@/components/contacts/contact-name"
+import BulkTagOperations from "@/components/contacts/bulk-tag-operations"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 
 
 interface ConversationData {
@@ -130,6 +141,14 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
     const [bulkTaskDueDate, setBulkTaskDueDate] = useState('')
     const [bulkTaskDueTime, setBulkTaskDueTime] = useState('09:00')
     const [isCreatingBulkTasks, setIsCreatingBulkTasks] = useState(false)
+    const [savedTaskTypes, setSavedTaskTypes] = useState<string[]>([])
+
+    // Bulk tag state
+    const [showBulkTagDialog, setShowBulkTagDialog] = useState(false)
+
+    // Bulk delete state
+    const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false)
+    const [isDeletingConversations, setIsDeletingConversations] = useState(false)
 
     // Track user activity to prevent auto-refresh collision
     const [lastUserActivity, setLastUserActivity] = useState<number>(Date.now())
@@ -147,6 +166,22 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
   useEffect(() => {
     loadConversations()
   }, [debouncedSearchQuery, dateFilter, debouncedStartDate, debouncedEndDate, conversationFilter, directionFilter])
+
+  // Load task types for bulk task creation
+  useEffect(() => {
+    const loadTaskTypes = async () => {
+      try {
+        const res = await fetch('/api/settings/task-types')
+        if (res.ok) {
+          const data = await res.json()
+          setSavedTaskTypes(data.taskTypes || [])
+        }
+      } catch (error) {
+        console.error('Error loading task types:', error)
+      }
+    }
+    loadTaskTypes()
+  }, [])
 
   // FIX: Auto-refresh conversations every 30 seconds while preserving scroll position
   // BUT: Pause auto-refresh if user is actively filtering/scrolling (within last 5 seconds)
@@ -435,33 +470,8 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
       phone1: conversation.contact.phone1,
       llcName: conversation.contact.llcName,
       propertyAddress: conversation.contact.propertyAddress,
-      // Add other required Contact fields with defaults
-      email2: null,
-      email3: null,
-      phone2: null,
-      phone3: null,
-      email2: null,
-      email3: null,
-      city: null,
-      state: null,
-      propertyCity: null,
-      propertyState: null,
-      propertyZip: null,
-      propertyCounty: null,
-      propertyType: null,
-      bedrooms: null,
-      totalBathrooms: null,
-      buildingSqft: null,
-      effectiveYearBuilt: null,
-      estValue: null,
-      estEquity: null,
-      dnc: null,
-      dncReason: null,
-      dealStatus: null,
-      notes: null,
-      avatarUrl: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     }
     onSelectContact(contact)
   }
@@ -519,6 +529,50 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
     } finally {
       setIsCreatingBulkTasks(false)
     }
+  }
+
+  // Handle bulk delete conversations
+  const handleBulkDelete = async () => {
+    if (selectedConversationIds.size === 0) return
+
+    setIsDeletingConversations(true)
+    try {
+      // Get contact IDs from selected conversations
+      const contactIds = sortedConversations
+        .filter(c => selectedConversationIds.has(c.id))
+        .map(c => c.contact_id)
+
+      const response = await fetch('/api/conversations/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactIds }),
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to delete conversations')
+      }
+
+      const result = await response.json()
+      toast({ title: 'Success', description: `Deleted ${result.count} conversations` })
+
+      // Reset state and refresh
+      setShowBulkDeleteDialog(false)
+      setSelectedConversationIds(new Set())
+      setBulkActionMode(false)
+      loadConversations()
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.message || 'Failed to delete conversations', variant: 'destructive' })
+    } finally {
+      setIsDeletingConversations(false)
+    }
+  }
+
+  // Get selected contact IDs for bulk tag operations
+  const getSelectedContactIds = () => {
+    return sortedConversations
+      .filter(c => selectedConversationIds.has(c.id))
+      .map(c => c.contact_id)
   }
 
   // Toggle conversation selection
@@ -756,17 +810,19 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
 
         {/* Bulk Action Bar */}
         {bulkActionMode && (
-          <div className="mt-3 p-2 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                checked={selectedConversationIds.size === sortedConversations.length && sortedConversations.length > 0}
-                onCheckedChange={toggleSelectAll}
-              />
-              <span className="text-sm text-blue-700">
-                {selectedConversationIds.size} selected
-              </span>
+          <div className="mt-3 p-2 bg-blue-50 border border-blue-200 rounded-lg flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  checked={selectedConversationIds.size === sortedConversations.length && sortedConversations.length > 0}
+                  onCheckedChange={toggleSelectAll}
+                />
+                <span className="text-sm text-blue-700">
+                  {selectedConversationIds.size} selected
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button
                 size="sm"
                 variant="outline"
@@ -775,6 +831,24 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
               >
                 <ClipboardList className="h-4 w-4 mr-1" />
                 Create Tasks
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowBulkTagDialog(true)}
+                disabled={selectedConversationIds.size === 0}
+              >
+                <Tag className="h-4 w-4 mr-1" />
+                Assign Tags
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => setShowBulkDeleteDialog(true)}
+                disabled={selectedConversationIds.size === 0}
+              >
+                <Trash2 className="h-4 w-4 mr-1" />
+                Delete
               </Button>
             </div>
           </div>
@@ -982,13 +1056,23 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
               <Label htmlFor="bulk-task-type">Task Type</Label>
               <Select value={bulkTaskType} onValueChange={(v: any) => setBulkTaskType(v)}>
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue placeholder="Select task type" />
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="task">Task</SelectItem>
-                  <SelectItem value="call">Call</SelectItem>
-                  <SelectItem value="email">Email</SelectItem>
-                  <SelectItem value="meeting">Meeting</SelectItem>
+                <SelectContent className="max-h-[300px] overflow-y-auto">
+                  {savedTaskTypes.length === 0 ? (
+                    <>
+                      <SelectItem value="task">Task</SelectItem>
+                      <SelectItem value="call">Call</SelectItem>
+                      <SelectItem value="email">Email</SelectItem>
+                      <SelectItem value="meeting">Meeting</SelectItem>
+                    </>
+                  ) : (
+                    savedTaskTypes.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -1023,6 +1107,40 @@ const EnhancedConversationsList = forwardRef<any, EnhancedConversationsListProps
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Bulk Tag Operations Dialog */}
+      <BulkTagOperations
+        open={showBulkTagDialog}
+        onOpenChange={setShowBulkTagDialog}
+        selectedContactIds={getSelectedContactIds()}
+        onComplete={() => {
+          setSelectedConversationIds(new Set())
+          setBulkActionMode(false)
+          loadConversations()
+        }}
+      />
+
+      {/* Bulk Delete Confirmation Dialog */}
+      <AlertDialog open={showBulkDeleteDialog} onOpenChange={setShowBulkDeleteDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {selectedConversationIds.size} Conversations?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete all messages in the selected conversations. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeletingConversations}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleBulkDelete}
+              disabled={isDeletingConversations}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isDeletingConversations ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 })

@@ -78,6 +78,12 @@ import { useContactPanel } from '@/lib/context/contact-panel-context';
 import { normalizePropertyType } from '@/lib/property-type-mapper';
 import { CallButtonWithCellHover } from '@/components/ui/call-button-with-cell-hover';
 
+interface TaskTag {
+  id: string;
+  name: string;
+  color: string;
+}
+
 interface Task {
   id: string;
   taskType?: string;
@@ -95,6 +101,7 @@ interface Task {
   createdById?: string;
   createdByName?: string;
   createdAt: Date | string;
+  tags?: TaskTag[];
 }
 
 interface UserOption {
@@ -368,11 +375,13 @@ export default function TasksExcelView() {
     try {
       const saved = localStorage.getItem('tasks_saved_views');
       const savedDefault = localStorage.getItem('tasks_default_view');
+      const savedDefaultViewState = localStorage.getItem('tasks_default_view_state');
+
       if (saved) {
         const views = JSON.parse(saved);
         setSavedViews(views);
 
-        // Load default view if set
+        // Load default view if set to a custom view
         if (savedDefault && savedDefault !== 'default') {
           const defaultViewData = views.find((v: any) => v.name === savedDefault);
           if (defaultViewData) {
@@ -383,8 +392,25 @@ export default function TasksExcelView() {
             setColumnOrder(defaultViewData.columnOrder || []);
             setCurrentView(savedDefault);
           }
+        } else if (savedDefaultViewState) {
+          // Load saved default view state
+          const defaultState = JSON.parse(savedDefaultViewState);
+          setColumnVisibility(defaultState.columnVisibility || {});
+          setColumnSizing(defaultState.columnSizing || {});
+          setColumnFilters(defaultState.columnFilters || []);
+          setSorting(defaultState.sorting || []);
+          setColumnOrder(defaultState.columnOrder || []);
         }
+      } else if (savedDefaultViewState) {
+        // No custom views but default state exists
+        const defaultState = JSON.parse(savedDefaultViewState);
+        setColumnVisibility(defaultState.columnVisibility || {});
+        setColumnSizing(defaultState.columnSizing || {});
+        setColumnFilters(defaultState.columnFilters || []);
+        setSorting(defaultState.sorting || []);
+        setColumnOrder(defaultState.columnOrder || []);
       }
+
       if (savedDefault) {
         setDefaultView(savedDefault);
       }
@@ -392,6 +418,20 @@ export default function TasksExcelView() {
       console.error('Error loading saved views:', error);
     }
   };
+
+  // Auto-save default view state when it changes
+  useEffect(() => {
+    if (currentView === 'default') {
+      const defaultState = {
+        columnVisibility,
+        columnSizing,
+        columnFilters,
+        sorting,
+        columnOrder,
+      };
+      localStorage.setItem('tasks_default_view_state', JSON.stringify(defaultState));
+    }
+  }, [currentView, columnVisibility, columnSizing, columnFilters, sorting, columnOrder]);
 
   // Save current view
   const saveView = (viewName: string) => {
@@ -663,7 +703,7 @@ export default function TasksExcelView() {
         setFollowUpTask({
           subject: `Follow up: ${task.subject}`,
           dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
-          priority: task.priority || 'medium',
+          priority: 'low', // Default follow-up tasks to low priority
         });
         setShowFollowUpDialog(true);
       }
@@ -802,6 +842,7 @@ export default function TasksExcelView() {
     contactEmail: 'Email',
     dueDate: 'Due Date',
     priority: 'Priority',
+    tags: 'Tags',
     contactAddress: 'Address',
     contactCity: 'City',
     contactState: 'State',
@@ -1342,6 +1383,40 @@ export default function TasksExcelView() {
           );
         },
         size: 120,
+      },
+      {
+        id: 'tags',
+        header: 'Tags',
+        cell: ({ row }) => {
+          const tags = row.original.tags || [];
+          if (tags.length === 0) {
+            return <span className="text-muted-foreground">-</span>;
+          }
+          return (
+            <div className="flex flex-wrap gap-1">
+              {tags.slice(0, 3).map((tag) => (
+                <Badge
+                  key={tag.id}
+                  variant="outline"
+                  style={{
+                    backgroundColor: `${tag.color}20`,
+                    borderColor: tag.color,
+                    color: tag.color,
+                  }}
+                  className="text-xs"
+                >
+                  {tag.name}
+                </Badge>
+              ))}
+              {tags.length > 3 && (
+                <Badge variant="outline" className="text-xs">
+                  +{tags.length - 3}
+                </Badge>
+              )}
+            </div>
+          );
+        },
+        size: 180,
       },
       {
         accessorKey: 'contactAddress',
@@ -1956,14 +2031,35 @@ export default function TasksExcelView() {
             <DropdownMenuCheckboxItem
               checked={currentView === 'default'}
               onCheckedChange={() => {
+                // Load saved default view state or use hardcoded defaults
+                try {
+                  const savedDefaultState = localStorage.getItem('tasks_default_view_state');
+                  if (savedDefaultState) {
+                    const defaultState = JSON.parse(savedDefaultState);
+                    setColumnVisibility(defaultState.columnVisibility || {});
+                    setColumnSizing(defaultState.columnSizing || {});
+                    setColumnFilters(defaultState.columnFilters || []);
+                    setSorting(defaultState.sorting || []);
+                    setColumnOrder(defaultState.columnOrder || []);
+                  } else {
+                    // Fallback to original defaults
+                    setColumnVisibility({
+                      contactAddress: false,
+                      contactCity: false,
+                      contactState: false,
+                      contactZip: false,
+                    });
+                  }
+                } catch {
+                  // On error, use hardcoded defaults
+                  setColumnVisibility({
+                    contactAddress: false,
+                    contactCity: false,
+                    contactState: false,
+                    contactZip: false,
+                  });
+                }
                 setCurrentView('default');
-                setColumnVisibility({
-                  contactAddress: false,
-                  contactCity: false,
-                  contactState: false,
-                  contactZip: false,
-                  // propertyType is visible by default
-                });
               }}
             >
               Default View {defaultView === 'default' && '⭐'}

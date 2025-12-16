@@ -63,8 +63,15 @@ export default function InlineTagEditor({ contactId, initialTags, onTagsChange }
 
       if (!response.ok) throw new Error('Failed to update tags');
 
+      const updatedContact = await response.json();
       setTags(newTags);
       onTagsChange?.(newTags);
+
+      // Dispatch event to notify contacts list to update this contact
+      window.dispatchEvent(new CustomEvent('contact-updated', {
+        detail: { contactId, updatedContact }
+      }));
+
       toast.success('Tags updated');
     } catch (error) {
       toast.error('Failed to update tags');

@@ -73,9 +73,30 @@ export default function InboundCallNotification({ onAnswer, onDecline }: Inbound
           console.log("[INBOUND] callUpdate:", data.state, data.direction)
         }
 
+        // Listen for inboundCallUpdate to get destinationNumber when invite arrives late
+        const handleInboundCallUpdate = (data: { callId: string; destinationNumber?: string; callerNumber?: string; callerName?: string }) => {
+          if (!mounted) return
+          console.log("[INBOUND] inboundCallUpdate received:", data)
+
+          // Update the inbound call with the destination number
+          setInboundCall(prev => {
+            if (prev && (prev.callId === data.callId || !prev.destinationNumber)) {
+              console.log("[INBOUND] Updating call with destinationNumber:", data.destinationNumber)
+              return {
+                ...prev,
+                destinationNumber: data.destinationNumber || prev.destinationNumber,
+                callerNumber: data.callerNumber || prev.callerNumber,
+                callerName: data.callerName || prev.callerName
+              }
+            }
+            return prev
+          })
+        }
+
         rtcClient.on("inboundCall", handleInboundCall)
         rtcClient.on("inboundCallEnded", handleInboundEnded)
         rtcClient.on("callUpdate", handleCallUpdate)
+        rtcClient.on("inboundCallUpdate", handleInboundCallUpdate)
 
         console.log("[INBOUND] ✅ Listeners registered")
 
@@ -91,6 +112,7 @@ export default function InboundCallNotification({ onAnswer, onDecline }: Inbound
           rtcClient.off("inboundCall", handleInboundCall)
           rtcClient.off("inboundCallEnded", handleInboundEnded)
           rtcClient.off("callUpdate", handleCallUpdate)
+          rtcClient.off("inboundCallUpdate", handleInboundCallUpdate)
         }
       } catch (err) {
         console.error("[INBOUND] Error setting up listener:", err)

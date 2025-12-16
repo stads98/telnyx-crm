@@ -277,13 +277,19 @@ export default function UnifiedCreateTaskModal({
             <Label>
               Contact <span className="text-red-500">*</span>
             </Label>
-            <Popover open={contactSearchOpen} onOpenChange={setContactSearchOpen} modal={true}>
+            <Popover open={contactSearchOpen} onOpenChange={setContactSearchOpen}>
               <PopoverTrigger asChild>
                 <Button
+                  type="button"
                   variant="outline"
                   role="combobox"
                   aria-expanded={contactSearchOpen}
                   className="w-full justify-between font-normal"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContactSearchOpen(!contactSearchOpen);
+                  }}
                 >
                   {selectedContact ? (
                     <span className="flex items-center gap-2">
@@ -301,7 +307,19 @@ export default function UnifiedCreateTaskModal({
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="w-[400px] p-0 z-[9999]" align="start">
+              <PopoverContent
+                className="w-[400px] p-0"
+                align="start"
+                style={{ zIndex: 99999 }}
+                onOpenAutoFocus={(e) => e.preventDefault()}
+                onInteractOutside={(e) => {
+                  // Don't close if clicking inside the dialog
+                  const target = e.target as HTMLElement;
+                  if (target.closest('[role="dialog"]')) {
+                    e.preventDefault();
+                  }
+                }}
+              >
                 <Command
                   filter={(value, search) => {
                     if (!search) return 1;
