@@ -60,11 +60,11 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST to acknowledge/cleanup a call after processing
+// POST to acknowledge/cleanup a call or mark as ended
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions)
-    
+
     if (!session?.user?.id) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
@@ -91,6 +91,12 @@ export async function POST(request: NextRequest) {
       // Remove from pending calls
       pendingAMDCalls.delete(callControlId)
       return NextResponse.json({ success: true, message: 'Call cleaned up' })
+    }
+
+    if (action === 'end') {
+      // Mark call as ended (for client-side hangups)
+      pendingCall.status = 'ended'
+      return NextResponse.json({ success: true, message: 'Call marked as ended' })
     }
 
     return NextResponse.json({ success: true })

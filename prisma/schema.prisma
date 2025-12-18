@@ -70,6 +70,8 @@ model Contact {
   scheduledMessages       ScheduledMessage[]       @relation("ContactScheduledMessages")
   dispositionLogs         CallDispositionLog[]
   clickToCallPending      ClickToCallPending[]     @relation("ContactClickToCallPending")
+  textCampaignQueue       TextCampaignQueue[]
+  textCampaignMessages    TextCampaignMessage[]
 
   // Performance indexes for common queries
   @@index([pipelineId], name: "idx_contacts_pipeline_id")
@@ -477,9 +479,11 @@ model Deal {
   loanCopilotData     Json?     @map("loan_copilot_data")
 
   // Relations
-  dealStage DealPipelineStage? @relation("DealPipelineStage", fields: [stageId], references: [id])
-  lender    Lender?            @relation("DealLender", fields: [lenderId], references: [id])
-  contact   Contact            @relation("ContactDeals", fields: [contact_id], references: [id], onDelete: Cascade)
+  dealStage      DealPipelineStage?  @relation("DealPipelineStage", fields: [stageId], references: [id])
+  lender         Lender?             @relation("DealLender", fields: [lenderId], references: [id])
+  contact        Contact             @relation("ContactDeals", fields: [contact_id], references: [id], onDelete: Cascade)
+  checklistItems LoanChecklistItem[] @relation("DealChecklistItems")
+  loanDocuments  LoanDocument[]      @relation("DealLoanDocuments")
 
   @@index([contact_id])
   @@index([stageId])
@@ -546,6 +550,61 @@ model Document {
   updated_at         DateTime      @updatedAt @db.Timestamptz(6)
 
   @@map("documents")
+}
+
+// Loan Document categories for checklist items
+enum LoanDocCategory {
+  BORROWER
+  PROPERTY
+  TITLE
+  INSURANCE
+  OTHER
+}
+
+// Loan Checklist Item - tracks required documents for a loan deal
+model LoanChecklistItem {
+  id          String           @id @default(uuid()) @db.Uuid
+  dealId      String           @map("deal_id") @db.Uuid
+  label       String           @db.VarChar(255)
+  category    LoanDocCategory  @default(OTHER)
+  required    Boolean          @default(false)
+  completed   Boolean          @default(false)
+  notes       String?
+  orderIndex  Int              @default(0) @map("order_index")
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // Relations
+  deal        Deal             @relation("DealChecklistItems", fields: [dealId], references: [id], onDelete: Cascade)
+  documents   LoanDocument[]   @relation("ChecklistItemDocuments")
+
+  @@index([dealId])
+  @@map("loan_checklist_items")
+}
+
+// Loan Document - individual files uploaded against a checklist item
+model LoanDocument {
+  id              String            @id @default(uuid()) @db.Uuid
+  checklistItemId String            @map("checklist_item_id") @db.Uuid
+  dealId          String            @map("deal_id") @db.Uuid
+  originalName    String            @map("original_name") @db.VarChar(255)
+  storedName      String            @map("stored_name") @db.VarChar(255)
+  filePath        String            @map("file_path")
+  fileSize        Int?              @map("file_size")
+  mimeType        String?           @map("mime_type") @db.VarChar(100)
+  fileExtension   String?           @map("file_extension") @db.VarChar(20)
+  uploadedBy      String?           @map("uploaded_by") @db.Uuid
+  uploadedAt      DateTime          @default(now()) @map("uploaded_at") @db.Timestamptz(6)
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // Relations
+  checklistItem   LoanChecklistItem @relation("ChecklistItemDocuments", fields: [checklistItemId], references: [id], onDelete: Cascade)
+  deal            Deal              @relation("DealLoanDocuments", fields: [dealId], references: [id], onDelete: Cascade)
+
+  @@index([checklistItemId])
+  @@index([dealId])
+  @@map("loan_documents")
 }
 
 model Conversation {
@@ -1073,6 +1132,162 @@ model TextAutomation {
   @@map("text_automations")
 }
 
+// ==========================================
+// Text Campaign (Power Dialer for SMS)
+// ==========================================
+
+model TextCampaign {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation("UserTextCampaigns", fields: [userId], references: [id], onDelete: Cascade)
+
+  // Campaign metadata
+  name        String
+  description String?
+
+  // Campaign status
+  status TextCampaignStatus @default(IDLE)
+
+  // Configuration
+  delaySeconds     Int      @default(2) @map("delay_seconds") // Delay between messages
+  maxRounds        Int      @default(1) @map("max_rounds") // Number of rounds (templates)
+  currentRound     Int      @default(1) @map("current_round") // Current round being sent
+  currentIndex     Int      @default(0) @map("current_index") // Current position in queue
+  selectedNumbers  String[] @map("selected_numbers") // DIDs to use for outbound
+
+  // Tag-based filtering (like Power Dialer)
+  includeTagIds String[] @default([]) @map("include_tag_ids")
+  excludeTagIds String[] @default([]) @map("exclude_tag_ids")
+
+  // Templates for each round (JSON array of template objects)
+  // Format: [{ round: 1, templateId: "uuid", content: "message" }, ...]
+  templates Json @default("[]")
+
+  // Phone number assignment tracking (JSON object)
+  // Format: { "contactId": "phoneNumber", ... } - which DID is assigned to each contact
+  phoneAssignments Json @default("{}") @map("phone_assignments")
+
+  // Progress tracking
+  totalContacts  Int @default(0) @map("total_contacts")
+  sentCount      Int @default(0) @map("sent_count")
+  deliveredCount Int @default(0) @map("delivered_count")
+  failedCount    Int @default(0) @map("failed_count")
+  respondedCount Int @default(0) @map("responded_count")
+
+  // Timestamps
+  startedAt   DateTime? @map("started_at")
+  pausedAt    DateTime? @map("paused_at")
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  queueItems TextCampaignQueue[]
+  messages   TextCampaignMessage[]
+  Pipeline   Pipeline?             @relation(fields: [pipelineId], references: [id])
+  pipelineId String?               @db.Uuid
+
+  @@index([userId, status])
+  @@index([createdAt(sort: Desc)])
+  @@map("text_campaigns")
+}
+
+model TextCampaignQueue {
+  id         String       @id @default(uuid()) @db.Uuid
+  campaignId String       @map("campaign_id") @db.Uuid
+  campaign   TextCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  contactId String  @map("contact_id") @db.Uuid
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  // Queue status
+  status   TextCampaignQueueStatus @default(PENDING)
+  priority Int                     @default(0) // Higher = sent first
+
+  // Round tracking
+  currentRound Int @default(1) @map("current_round") // Which round this contact is on
+
+  // Assigned phone number (sticky - same number for all rounds)
+  assignedNumber String? @map("assigned_number")
+
+  // Tracking
+  attemptCount Int       @default(0) @map("attempt_count")
+  lastSentAt   DateTime? @map("last_sent_at")
+  respondedAt  DateTime? @map("responded_at") // When they replied (removes from queue)
+
+  // Timestamps
+  addedAt     DateTime  @default(now()) @map("added_at")
+  completedAt DateTime? @map("completed_at")
+
+  // Relations
+  messages TextCampaignMessage[]
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId, status])
+  @@index([campaignId, currentRound])
+  @@map("text_campaign_queue")
+}
+
+model TextCampaignMessage {
+  id         String       @id @default(uuid()) @db.Uuid
+  campaignId String       @map("campaign_id") @db.Uuid
+  campaign   TextCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  queueItemId String            @map("queue_item_id") @db.Uuid
+  queueItem   TextCampaignQueue @relation(fields: [queueItemId], references: [id], onDelete: Cascade)
+
+  contactId String  @map("contact_id") @db.Uuid
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  // Message details
+  fromNumber String @map("from_number")
+  toNumber   String @map("to_number")
+  content    String @db.Text
+  round      Int    @default(1) // Which round this message belongs to
+
+  // Telnyx tracking
+  telnyxMessageId String? @map("telnyx_message_id")
+
+  // Status
+  status        TextCampaignMessageStatus @default(PENDING)
+  deliveryError String?                   @map("delivery_error")
+
+  // Timestamps
+  sentAt      DateTime? @map("sent_at")
+  deliveredAt DateTime? @map("delivered_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([campaignId, status])
+  @@index([campaignId, round])
+  @@index([contactId])
+  @@map("text_campaign_messages")
+}
+
+enum TextCampaignStatus {
+  IDLE
+  RUNNING
+  PAUSED
+  ROUND_COMPLETE // Waiting to start next round
+  COMPLETED
+  STOPPED
+}
+
+enum TextCampaignQueueStatus {
+  PENDING
+  SENDING
+  SENT
+  RESPONDED // Contact replied - removed from queue
+  FAILED
+  SKIPPED
+}
+
+enum TextCampaignMessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+}
+
 enum TextBlastStatus {
   draft
   pending
@@ -1589,6 +1804,9 @@ model User {
 
   // Text blast relations
   textBlasts TextBlast[] @relation("UserTextBlasts")
+
+  // Text campaign relations
+  textCampaigns TextCampaign[] @relation("UserTextCampaigns")
 
   // Email blast relations
   emailBlasts EmailBlast[] @relation("UserEmailBlasts")
@@ -2247,6 +2465,7 @@ model Pipeline {
   deals                Deal[]
   tags                 Tag[]
   textBlasts           TextBlast[]
+  textCampaigns        TextCampaign[]
   textAutomations      TextAutomation[]
   filterPresets        FilterPreset[]
   powerDialerLists     PowerDialerList[]

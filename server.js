@@ -2,6 +2,8 @@ const { createServer } = require('http')
 const { parse } = require('url')
 const next = require('next')
 const { Server } = require('socket.io')
+const fs = require('fs')
+const path = require('path')
 
 const dev = process.env.NODE_ENV !== 'production'
 const hostname = 'localhost'
@@ -10,10 +12,54 @@ const port = parseInt(process.env.PORT || '3000', 10)
 const app = next({ dev, hostname, port })
 const handle = app.getRequestHandler()
 
+// Mime types for static file serving
+const mimeTypes = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.csv': 'text/csv',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.txt': 'text/plain',
+}
+
 app.prepare().then(() => {
   const httpServer = createServer(async (req, res) => {
     try {
       const parsedUrl = parse(req.url, true)
+      const { pathname } = parsedUrl
+
+      // Serve static files from /uploads directory
+      if (pathname && pathname.startsWith('/uploads/')) {
+        const filePath = path.join(process.cwd(), pathname)
+
+        // Security: prevent directory traversal
+        if (!filePath.startsWith(path.join(process.cwd(), 'uploads'))) {
+          res.statusCode = 403
+          res.end('Forbidden')
+          return
+        }
+
+        if (fs.existsSync(filePath)) {
+          const ext = path.extname(filePath).toLowerCase()
+          const contentType = mimeTypes[ext] || 'application/octet-stream'
+          res.setHeader('Content-Type', contentType)
+          res.setHeader('Content-Disposition', 'inline')
+          const fileStream = fs.createReadStream(filePath)
+          fileStream.pipe(res)
+          return
+        } else {
+          res.statusCode = 404
+          res.end('File not found')
+          return
+        }
+      }
+
       await handle(req, res, parsedUrl)
     } catch (err) {
       console.error('Error occurred handling', req.url, err)

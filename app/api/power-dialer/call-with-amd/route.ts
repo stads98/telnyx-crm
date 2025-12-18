@@ -58,17 +58,16 @@ export async function POST(request: NextRequest) {
         // Premium AMD uses speech recognition + ML to distinguish humans from machines
         answering_machine_detection: 'premium',
         answering_machine_detection_config: {
-          // BALANCED AMD: Prioritize accuracy over speed to reduce false positives
-          // Voicemails typically have longer greetings (5-15 seconds)
-          // Humans typically answer with short phrases ("Hello?", "Hi, who's this?")
-          total_analysis_time_millis: 5000,      // 5 seconds max total analysis (balanced)
-          after_greeting_silence_millis: 1200,   // 1.2s silence after greeting
-          between_words_silence_millis: 600,     // 0.6s between words
-          greeting_duration_millis: 4000,        // 4s max greeting length (voicemails are longer)
-          initial_silence_millis: 2500,          // 2.5s initial silence before speech
-          maximum_number_of_words: 8,            // 8 words max (voicemails have more words)
+          // BALANCED AMD: Give Telnyx enough time to analyze while still being fast
+          // Too fast = "not_sure" results (can't determine), too slow = frustrating wait
+          total_analysis_time_millis: 4000,      // 4 seconds max total analysis
+          after_greeting_silence_millis: 1000,   // 1s silence after greeting
+          between_words_silence_millis: 500,     // 0.5s between words
+          greeting_duration_millis: 3500,        // 3.5s max greeting length
+          initial_silence_millis: 2000,          // 2s initial silence before speech
+          maximum_number_of_words: 6,            // 6 words (voicemails say more)
           silence_threshold: 256,
-          greeting_total_analysis_time_millis: 5000, // 5s total for greeting analysis
+          greeting_total_analysis_time_millis: 4000, // 4s total for greeting analysis
         },
         webhook_url: `${WEBHOOK_BASE_URL}/api/power-dialer/webhooks/amd`,
         client_state: Buffer.from(JSON.stringify({

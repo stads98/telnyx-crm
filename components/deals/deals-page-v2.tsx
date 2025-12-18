@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -14,12 +14,17 @@ import DealsKanbanView from './deals-kanban-view';
 import DealsTableView from './deals-table-view';
 import NewDealDialogV2 from './new-deal-dialog-v2';
 import PipelineManagementDialog from './pipeline-management-dialog';
+import { useGlobalCache } from '@/lib/stores/useGlobalCache';
 
 interface DealsPageV2Props {
   initialPipelineId?: string;
 }
 
 export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
+  // Global cache for instant loading
+  const globalCache = useGlobalCache();
+  const initialLoadDone = useRef(false);
+
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [lenders, setLenders] = useState<Lender[]>([]);
@@ -38,37 +43,46 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
   const selectedPipeline = pipelines.find(p => p.id === selectedPipelineId);
   const isLoanPipeline = selectedPipeline?.isLoanPipeline || false;
 
-  // Load pipelines on mount
-  useEffect(() => {
-    loadPipelines();
-    loadLenders();
-  }, []);
-
-  // Load deals when pipeline changes
-  useEffect(() => {
-    if (selectedPipelineId) {
-      loadDeals();
-    }
-  }, [selectedPipelineId]);
-
+  // Define loadPipelines with caching
   const loadPipelines = async () => {
     try {
-      const res = await fetch('/api/pipelines?includeStages=true');
-      if (res.ok) {
-        const data = await res.json();
-        setPipelines(data.pipelines || []);
-        // Select first pipeline if none selected
-        if (!selectedPipelineId && data.pipelines?.length > 0) {
-          const defaultPipeline = data.pipelines.find((p: Pipeline) => p.isDefault) || data.pipelines[0];
+      // Check cache first for instant load
+      const cachedPipelines = globalCache.getCached<Pipeline[]>('pipelines');
+      if (cachedPipelines && cachedPipelines.length > 0) {
+        setPipelines(cachedPipelines);
+        if (!selectedPipelineId) {
+          const defaultPipeline = cachedPipelines.find((p: Pipeline) => p.isDefault) || cachedPipelines[0];
           setSelectedPipelineId(defaultPipeline.id);
         }
+        // Background refresh if stale
+        if (!globalCache.isCacheFresh('pipelines')) {
+          fetchFreshPipelines();
+        }
+        return;
       }
+
+      await fetchFreshPipelines();
     } catch (error) {
       console.error('Error loading pipelines:', error);
       toast.error('Failed to load pipelines');
     }
   };
 
+  const fetchFreshPipelines = async () => {
+    const res = await fetch('/api/pipelines?includeStages=true');
+    if (res.ok) {
+      const data = await res.json();
+      const pipelinesList = data.pipelines || [];
+      setPipelines(pipelinesList);
+      globalCache.setPipelines(pipelinesList);
+      if (!selectedPipelineId && pipelinesList.length > 0) {
+        const defaultPipeline = pipelinesList.find((p: Pipeline) => p.isDefault) || pipelinesList[0];
+        setSelectedPipelineId(defaultPipeline.id);
+      }
+    }
+  };
+
+  // Define loadLenders
   const loadLenders = async () => {
     try {
       const res = await fetch('/api/lenders');
@@ -81,15 +95,45 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
     }
   };
 
+  // Define loadDeals with useCallback and caching
   const loadDeals = useCallback(async () => {
     if (!selectedPipelineId) return;
-    
+
     try {
+      // Check cache first for instant load (only for default view without filters)
+      const cachedDeals = globalCache.getCached<Deal[]>('deals');
+      if (cachedDeals && !showWon && !showLost && !showArchived && !initialLoadDone.current) {
+        setDeals(cachedDeals);
+        setLoading(false);
+        initialLoadDone.current = true;
+        // Background refresh - inline the fetch logic
+        const params = new URLSearchParams({ pipelineId: selectedPipelineId });
+        fetch(`/api/deals?${params.toString()}`).then(async (res) => {
+          if (res.ok) {
+            const data = await res.json();
+            const dealsList = data.deals || [];
+            setDeals(dealsList);
+            globalCache.setDeals(dealsList);
+          }
+        });
+        return;
+      }
+
       setLoading(true);
-      const res = await fetch(`/api/deals?pipelineId=${selectedPipelineId}`);
+      const params = new URLSearchParams({ pipelineId: selectedPipelineId });
+      if (showWon) params.append('showWon', 'true');
+      if (showLost) params.append('showLost', 'true');
+      if (showArchived) params.append('showArchived', 'true');
+
+      const res = await fetch(`/api/deals?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
-        setDeals(data.deals || []);
+        const dealsList = data.deals || [];
+        setDeals(dealsList);
+        // Only cache default view
+        if (!showWon && !showLost && !showArchived) {
+          globalCache.setDeals(dealsList);
+        }
       }
     } catch (error) {
       console.error('Error loading deals:', error);
@@ -97,7 +141,20 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
     } finally {
       setLoading(false);
     }
-  }, [selectedPipelineId]);
+  }, [selectedPipelineId, showWon, showLost, showArchived, globalCache]);
+
+  // Load pipelines on mount
+  useEffect(() => {
+    loadPipelines();
+    loadLenders();
+  }, []);
+
+  // Load deals when pipeline or filters change
+  useEffect(() => {
+    if (selectedPipelineId) {
+      loadDeals();
+    }
+  }, [selectedPipelineId, showWon, showLost, showArchived, loadDeals]);
 
   const handleDealCreated = () => {
     setShowNewDealDialog(false);

@@ -106,6 +106,23 @@ interface ActivityHistoryItem {
   metadata?: Record<string, any>
 }
 
+// Helper function to render markdown-style bold text
+const renderMarkdownBold = (text: string) => {
+  if (!text) return null
+
+  // Split by ** markers and render bold text
+  const parts = text.split(/(\*\*.*?\*\*)/)
+
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      // Remove the ** markers and render as bold
+      const boldText = part.slice(2, -2)
+      return <strong key={index} className="font-semibold">{boldText}</strong>
+    }
+    return <span key={index}>{part}</span>
+  })
+}
+
 export default function ContactSidePanel({ contact, open, onClose }: ContactSidePanelProps) {
   const [activities, setActivities] = useState<Activity[]>([])
   const [activityHistory, setActivityHistory] = useState<ActivityHistoryItem[]>([])
@@ -154,6 +171,8 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
   const [savingNote, setSavingNote] = useState(false)
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null)
   const [editingNoteText, setEditingNoteText] = useState('')
+  const noteTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const editNoteTextareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Dragging state for non-modal floating panel
   const [isMinimized, setIsMinimized] = useState(false)
@@ -240,13 +259,19 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
 
     // Collect properties
     const propList: Property[] = []
+    // Helper to format zipcode (removes decimals like 34239.0 -> 34239)
+    const formatZip = (zip: string | number | null | undefined): string => {
+      if (zip === null || zip === undefined) return ""
+      return String(zip).replace(/\.0+$/, '')
+    }
+
     // Add primary property from contact if exists
     if (c.propertyAddress) {
       propList.push({
         address: c.propertyAddress || "",
         city: c.city || "",
         state: c.state || "",
-        zipCode: c.zipCode || "",
+        zipCode: formatZip(c.zipCode),
         llcName: c.llcName || "",
         propertyType: normalizePropertyType(c.propertyType) || "",
         bedrooms: c.bedrooms ?? undefined,
@@ -267,7 +292,7 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
           address: p.address || "",
           city: p.city || "",
           state: p.state || "",
-          zipCode: p.zipCode || "",
+          zipCode: formatZip(p.zipCode),
           llcName: p.llcName || "",
           propertyType: normalizePropertyType(p.propertyType) || "",
           bedrooms: p.bedrooms,
@@ -780,6 +805,82 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
     }
   }
 
+  // Handle bold text formatting (Cmd+B or Ctrl+B) for new note
+  const handleBoldText = () => {
+    const textarea = noteTextareaRef.current
+    if (!textarea) return
+
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const selectedText = newNote.substring(start, end)
+
+    if (selectedText) {
+      // Wrap selected text in ** for bold
+      const before = newNote.substring(0, start)
+      const after = newNote.substring(end)
+      const newText = `${before}**${selectedText}**${after}`
+
+      setNewNote(newText)
+
+      // Restore cursor position after the bold markers
+      setTimeout(() => {
+        textarea.focus()
+        textarea.setSelectionRange(start + 2, end + 2)
+      }, 0)
+    } else {
+      // No selection - insert ** markers and place cursor between them
+      const before = newNote.substring(0, start)
+      const after = newNote.substring(start)
+      const newText = `${before}****${after}`
+
+      setNewNote(newText)
+
+      // Place cursor between the markers
+      setTimeout(() => {
+        textarea.focus()
+        textarea.setSelectionRange(start + 2, start + 2)
+      }, 0)
+    }
+  }
+
+  // Handle bold text formatting for editing existing note
+  const handleBoldTextEdit = () => {
+    const textarea = editNoteTextareaRef.current
+    if (!textarea) return
+
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const selectedText = editingNoteText.substring(start, end)
+
+    if (selectedText) {
+      // Wrap selected text in ** for bold
+      const before = editingNoteText.substring(0, start)
+      const after = editingNoteText.substring(end)
+      const newText = `${before}**${selectedText}**${after}`
+
+      setEditingNoteText(newText)
+
+      // Restore cursor position after the bold markers
+      setTimeout(() => {
+        textarea.focus()
+        textarea.setSelectionRange(start + 2, end + 2)
+      }, 0)
+    } else {
+      // No selection - insert ** markers and place cursor between them
+      const before = editingNoteText.substring(0, start)
+      const after = editingNoteText.substring(start)
+      const newText = `${before}****${after}`
+
+      setEditingNoteText(newText)
+
+      // Place cursor between the markers
+      setTimeout(() => {
+        textarea.focus()
+        textarea.setSelectionRange(start + 2, start + 2)
+      }, 0)
+    }
+  }
+
   const handleSaveNote = async () => {
     if (!contact?.id || !newNote.trim()) return
     setSavingNote(true)
@@ -932,6 +1033,19 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
     markChanged()
   }
 
+  // Listen for global close-all-panels event (triggered by Cmd/Ctrl+X)
+  // This must be before any conditional returns to avoid hooks order issues
+  useEffect(() => {
+    const handleCloseAll = () => {
+      if (open) {
+        onClose()
+      }
+    }
+
+    window.addEventListener('close-all-panels', handleCloseAll)
+    return () => window.removeEventListener('close-all-panels', handleCloseAll)
+  }, [open, onClose])
+
   if (!open || !contact) return null
 
   // Split tasks into open and completed
@@ -1082,20 +1196,37 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
           {/* Add Note Input (multi-line) */}
           <div className="p-3 border-b bg-white">
             <div className="space-y-2">
-              <Textarea
-                placeholder="Add a note... use '-' for bullet points"
-                value={newNote}
-                onChange={(e) => setNewNote(e.target.value)}
-                rows={3}
-                className="text-sm resize-y"
-                disabled={savingNote}
-                onKeyDown={(e) => {
-                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && newNote.trim()) {
-                    e.preventDefault()
-                    handleSaveNote()
-                  }
-                }}
-              />
+              <div className="relative">
+                <Textarea
+                  ref={noteTextareaRef}
+                  placeholder="Add a note... use '-' for bullet points, Cmd/Ctrl+B to bold"
+                  value={newNote}
+                  onChange={(e) => setNewNote(e.target.value)}
+                  rows={3}
+                  className="text-sm resize-y"
+                  disabled={savingNote}
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && newNote.trim()) {
+                      e.preventDefault()
+                      handleSaveNote()
+                    }
+                    // Handle Cmd+B or Ctrl+B for bold
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+                      e.preventDefault()
+                      handleBoldText()
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleBoldText}
+                  className="absolute top-2 right-2 p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+                  title="Bold (Cmd/Ctrl+B)"
+                  disabled={savingNote}
+                >
+                  <strong className="text-xs font-bold">B</strong>
+                </button>
+              </div>
               <div className="flex justify-end gap-2">
                 {newNote && (
                   <Button
@@ -1229,6 +1360,7 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                               {editingNoteId === item.activityId && item.metadata?.activityType === 'note' ? (
                                 <div className="space-y-1">
                                   <Textarea
+                                    ref={editNoteTextareaRef}
                                     value={editingNoteText}
                                     onChange={(e) => setEditingNoteText(e.target.value)}
                                     rows={3}
@@ -1243,6 +1375,11 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                         e.preventDefault()
                                         setEditingNoteId(null)
                                         setEditingNoteText('')
+                                      }
+                                      // Handle Cmd+B or Ctrl+B for bold
+                                      if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+                                        e.preventDefault()
+                                        handleBoldTextEdit()
                                       }
                                     }}
                                   />
@@ -1277,7 +1414,7 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                 </div>
                               ) : expandedActivityIds.has(item.id) ? (
                                 <div>
-                                  <p className="text-xs text-gray-600 whitespace-pre-wrap">{item.description}</p>
+                                  <p className="text-xs text-gray-600 whitespace-pre-wrap">{renderMarkdownBold(item.description)}</p>
                                   <button
                                     className="text-blue-500 hover:text-blue-700 text-[10px] mt-1"
                                     onClick={(e) => {
@@ -1294,7 +1431,7 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                 </div>
                               ) : (
                                 <div className="flex items-center gap-1">
-                                  <p className="text-xs text-gray-500 line-clamp-1 flex-1">{item.description}</p>
+                                  <p className="text-xs text-gray-500 line-clamp-1 flex-1">{renderMarkdownBold(item.description)}</p>
                                   {item.description.length > 50 || item.description.includes('\n') ? (
                                     <button
                                       className="text-blue-500 hover:text-blue-700 text-[10px] flex-shrink-0"

@@ -10,7 +10,8 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev --name init",
     "db:studio": "prisma studio",
-    "db:push": "prisma db push"
+    "db:push": "prisma db push",
+    "cleanup:duplicate-calls": "tsx scripts/cleanup-duplicate-calls.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

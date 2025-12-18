@@ -26,7 +26,7 @@ export async function PATCH(
 
     // Map frontend fields to database fields
     const updateData: any = {};
-    
+
     if (body.taskType !== undefined) updateData.task_type = body.taskType;
     if (body.subject !== undefined) updateData.title = body.subject;
     if (body.description !== undefined) updateData.description = body.description;
@@ -41,6 +41,24 @@ export async function PATCH(
     if (body.contactId !== undefined) updateData.contact_id = body.contactId || null;
 
     console.log('[TASKS PATCH] Update data:', updateData);
+
+    // Handle tags update
+    if (body.tags !== undefined) {
+      // Delete existing tags
+      await prisma.activityTag.deleteMany({
+        where: { activity_id: id },
+      });
+
+      // Add new tags
+      if (body.tags && body.tags.length > 0) {
+        await prisma.activityTag.createMany({
+          data: body.tags.map((tag: { id: string }) => ({
+            activity_id: id,
+            tag_id: tag.id,
+          })),
+        });
+      }
+    }
 
     // Update the task
     const updatedTask = await prisma.activity.update({
@@ -59,6 +77,17 @@ export async function PATCH(
             state: true,
             zipCode: true,
             propertyType: true,
+          },
+        },
+        activity_tags: {
+          include: {
+            tag: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
           },
         },
       },
@@ -87,6 +116,11 @@ export async function PATCH(
       contactZip: updatedTask.contact?.zipCode || '',
       propertyType: updatedTask.contact?.propertyType || '',
       createdAt: updatedTask.created_at.toISOString(),
+      tags: updatedTask.activity_tags.map((at) => ({
+        id: at.tag.id,
+        name: at.tag.name,
+        color: at.tag.color,
+      })),
     };
 
     return NextResponse.json({ success: true, task });

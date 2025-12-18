@@ -87,6 +87,9 @@ export async function GET(
   }
 }
 
+// Valid DealStage enum values from Prisma schema
+const VALID_DEAL_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'contract', 'closing', 'closed_won', 'closed_lost'];
+
 export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
@@ -132,25 +135,68 @@ export async function PUT(
     // Support both stageId and stage_id
     const effectiveStageId = stageId || stage_id;
 
-    // If stageId is provided, get the stage key
+    // Get the current deal to preserve existing stage if needed
+    const currentDeal = await prisma.deal.findUnique({
+      where: { id: params.id },
+      select: { stage: true, stageId: true }
+    });
+
+    if (!currentDeal) {
+      return NextResponse.json({ error: 'Deal not found' }, { status: 404 });
+    }
+
+    // Determine the stage key to use
     let stageKey = stage;
+    let stageProbability = probability;
+
     if (effectiveStageId) {
+      // Look up the pipeline stage to get its key and check if it's won/lost
       const pipelineStage = await prisma.dealPipelineStage.findUnique({
         where: { id: effectiveStageId }
       });
+
       if (pipelineStage) {
-        stageKey = pipelineStage.key;
+        // Map pipeline stage to a valid DealStage enum value
+        const key = pipelineStage.key.toLowerCase();
+
+        // Check if the key directly matches a valid enum value
+        if (VALID_DEAL_STAGES.includes(key)) {
+          stageKey = key;
+        } else if (pipelineStage.isClosedStage) {
+          stageKey = 'closed_won';
+        } else if (pipelineStage.isLostStage) {
+          stageKey = 'closed_lost';
+        } else {
+          // For custom stages, map to the closest valid stage based on probability
+          const prob = pipelineStage.defaultProbability || 0;
+          if (prob >= 90) stageKey = 'closing';
+          else if (prob >= 75) stageKey = 'contract';
+          else if (prob >= 50) stageKey = 'negotiation';
+          else if (prob >= 30) stageKey = 'proposal';
+          else if (prob >= 20) stageKey = 'qualified';
+          else stageKey = 'lead';
+        }
+
+        // Use the stage's default probability if not explicitly set
+        if (stageProbability === undefined) {
+          stageProbability = pipelineStage.defaultProbability;
+        }
       }
+    }
+
+    // Validate that stageKey is a valid DealStage enum value
+    if (stageKey && !VALID_DEAL_STAGES.includes(stageKey)) {
+      stageKey = currentDeal.stage; // Keep existing stage if new one is invalid
     }
 
     const deal = await prisma.deal.update({
       where: { id: params.id },
       data: {
         name,
-        stage: stageKey,
+        stage: stageKey || undefined,
         stageId: effectiveStageId || undefined,
         value: value !== undefined ? parseFloat(value) : undefined,
-        probability: probability !== undefined ? parseInt(probability) : undefined,
+        probability: stageProbability !== undefined ? parseInt(String(stageProbability)) : undefined,
         contact_id,
         expected_close_date: expected_close_date ? new Date(expected_close_date) : null,
         notes,

@@ -98,6 +98,10 @@ export async function GET(request: NextRequest) {
     const createdAfter = searchParams.get('createdAfter') ? new Date(searchParams.get('createdAfter')!) : undefined
     const createdBefore = searchParams.get('createdBefore') ? new Date(searchParams.get('createdBefore')!) : undefined
 
+    // Property Sold Date filter (lastSaleDate)
+    const soldDateFrom = searchParams.get('soldDateFrom') ? new Date(searchParams.get('soldDateFrom')!) : undefined
+    const soldDateTo = searchParams.get('soldDateTo') ? new Date(searchParams.get('soldDateTo')!) : undefined
+
     const hasMultiValues = [dealStatus, propertyType, city, state, propertyCounty, tags].some(v => (v ?? '').includes(','))
     const useElasticsearch = (searchParams.get('useElasticsearch') === 'true' || !!search) && !hasMultiValues
 
@@ -461,6 +465,18 @@ export async function GET(request: NextRequest) {
         const endOfDay = new Date(createdBefore)
         endOfDay.setHours(23, 59, 59, 999)
         where.createdAt.lte = endOfDay
+      }
+    }
+
+    // Property Sold Date filter (lastSaleDate)
+    if (soldDateFrom || soldDateTo) {
+      where.lastSaleDate = {}
+      if (soldDateFrom) where.lastSaleDate.gte = soldDateFrom
+      if (soldDateTo) {
+        // Set to end of day for soldDateTo
+        const endOfDay = new Date(soldDateTo)
+        endOfDay.setHours(23, 59, 59, 999)
+        where.lastSaleDate.lte = endOfDay
       }
     }
 

@@ -993,54 +993,68 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
       setQueueAnimation([])
       setQueue(remainingQueue)
 
-      // Start real WebRTC calls for each contact
-      for (const contact of contactsToDial) {
-        try {
-          // Find an idle line
-          const currentLines = callLinesRef.current
-          const lineIdx = currentLines.findIndex(l => l.status === 'idle')
-          if (lineIdx === -1) {
-            console.log('[PowerDialer] No idle lines available')
-            continue
+      // PRE-ASSIGN: Get all idle line indices and assign contacts to them upfront
+      // This prevents race conditions when React state updates asynchronously
+      const currentLinesSnapshot = callLinesRef.current
+      const idleLineIndices: number[] = []
+      for (let i = 0; i < currentLinesSnapshot.length; i++) {
+        if (currentLinesSnapshot[i].status === 'idle') {
+          idleLineIndices.push(i)
+        }
+      }
+
+      // Create contact-to-line assignments upfront
+      const assignments: { contact: any; lineIdx: number; callerIdNumber: string }[] = []
+      for (let i = 0; i < contactsToDial.length && i < idleLineIndices.length; i++) {
+        const callerIdNumber = getNextCallerId()
+        assignments.push({
+          contact: contactsToDial[i],
+          lineIdx: idleLineIndices[i],
+          callerIdNumber
+        })
+      }
+
+      console.log('[PowerDialer] 📋 Pre-assigned', assignments.length, 'contacts to lines:', assignments.map(a => `Line ${a.lineIdx}: ${a.contact.firstName}`))
+
+      // IMMEDIATELY set all lines to dialing state (prevents race conditions)
+      setCallLines(prev => {
+        const updated = [...prev]
+        for (const { contact, lineIdx, callerIdNumber } of assignments) {
+          updated[lineIdx] = {
+            ...updated[lineIdx],
+            contact,
+            status: 'dialing',
+            startedAt: new Date(),
+            callerIdNumber
           }
+        }
+        return updated
+      })
 
-          // Get caller ID using round-robin rotation
-          const callerIdNumber = getNextCallerId()
-          console.log(`[PowerDialer] 📞 Using caller ID: ${callerIdNumber} (rotation index: ${callerIdRotationIndexRef.current})`)
+      // Import phone utils once
+      const { formatPhoneNumberForTelnyx } = await import('@/lib/phone-utils')
 
-          // Format phone number for Telnyx
-          const { formatPhoneNumberForTelnyx } = await import('@/lib/phone-utils')
+      // NOW initiate all calls in PARALLEL using Promise.all
+      const callPromises = assignments.map(async ({ contact, lineIdx, callerIdNumber }) => {
+        try {
           const toNumber = formatPhoneNumberForTelnyx(contact.phone) || contact.phone
 
           // Check if AMD is enabled
           if (amdEnabledRef.current) {
             // AMD ENABLED: Use server-side Call Control API with AMD
-            console.log('[PowerDialer AMD] 📞 Initiating AMD call to', contact.firstName, contact.lastName)
-
-            // Update line to dialing state
-            setCallLines(prev => {
-              const updated = [...prev]
-              updated[lineIdx] = {
-                ...updated[lineIdx],
-                contact,
-                status: 'dialing',
-                startedAt: new Date(),
-                callerIdNumber
-              }
-              return updated
-            })
+            console.log('[PowerDialer AMD] 📞 Initiating AMD call to', contact.firstName, contact.lastName, 'on line', lineIdx)
 
             const amdResult = await initiateAMDCall(contact, callerIdNumber, toNumber)
             if (!amdResult) {
-              console.error('[PowerDialer AMD] Failed to initiate AMD call')
+              console.error('[PowerDialer AMD] Failed to initiate AMD call for', contact.firstName)
               setCallLines(prev => prev.map((line, idx) =>
                 idx === lineIdx ? { ...line, contact: null, status: 'idle' as const } : line
               ))
-              continue
+              return
             }
 
             const { callControlId } = amdResult
-            console.log('[PowerDialer AMD] Call initiated, callControlId:', callControlId)
+            console.log('[PowerDialer AMD] Call initiated for', contact.firstName, ', callControlId:', callControlId)
 
             // Update line with callControlId
             setCallLines(prev => prev.map((line, idx) =>
@@ -1048,8 +1062,8 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
             ))
 
             // Poll for AMD result
-            const pollInterval = 500 // Poll every 500ms
-            const maxPollTime = 45000 // Max 45 seconds
+            const pollInterval = 300 // Poll every 300ms (faster)
+            const maxPollTime = 35000 // Max 35 seconds (ring timeout + AMD analysis)
             const pollStartTime = Date.now()
 
             const pollForResult = async () => {
@@ -1210,7 +1224,7 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
                   dispositionName: 'No Answer - Voicemail Detected',
                   dispositionColor: noAnswerDispo?.color || '#6b7280',
                   notes: 'AMD detected voicemail',
-                  callerIdNumber: line?.callerIdNumber
+                  callerIdNumber: callerIdNumber
                 }
                 setSessionHistory(prevHistory => [historyEntry, ...prevHistory])
 
@@ -1294,18 +1308,7 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
 
           } else {
             // AMD DISABLED: Use direct WebRTC (original behavior)
-            // Update line to dialing state
-            setCallLines(prev => {
-              const updated = [...prev]
-              updated[lineIdx] = {
-                ...updated[lineIdx],
-                contact,
-                status: 'dialing',
-                startedAt: new Date(),
-                callerIdNumber
-              }
-              return updated
-            })
+            // Line is already set to dialing from the pre-assignment above
 
             // Start real WebRTC call
             const { rtcClient } = await import('@/lib/webrtc/rtc-client')
@@ -1315,59 +1318,59 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
               fromNumber: callerIdNumber
             })
 
-          console.log('[PowerDialer] 📞 Started call to', contact.firstName, contact.lastName, 'sessionId:', sessionId)
+            console.log('[PowerDialer] 📞 Started call to', contact.firstName, contact.lastName, 'sessionId:', sessionId, 'on line', lineIdx)
 
-          // Log the call to database
-          fetch('/api/telnyx/webrtc-calls', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              webrtcSessionId: sessionId,
-              contactId: contact.id,
-              fromNumber: callerIdNumber,
-              toNumber,
-            })
-          }).catch(err => console.error('[PowerDialer] Failed to log call:', err))
+            // Log the call to database
+            fetch('/api/telnyx/webrtc-calls', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                webrtcSessionId: sessionId,
+                contactId: contact.id,
+                fromNumber: callerIdNumber,
+                toNumber,
+              })
+            }).catch(err => console.error('[PowerDialer] Failed to log call:', err))
 
-          // Update line with call ID
-          setCallLines(prev => prev.map((line, idx) =>
-            idx === lineIdx ? { ...line, callId: sessionId, status: 'ringing' } : line
-          ))
+            // Update line with call ID
+            setCallLines(prev => prev.map((line, idx) =>
+              idx === lineIdx ? { ...line, callId: sessionId, status: 'ringing' } : line
+            ))
 
-          // Listen for call events
-          const handleCallUpdate = (event: any) => {
-            // State is directly on the event, not on event.call
-            const callId = event?.callId || event?.call?.callId || event?.call?.id
+            // Listen for call events
+            const handleCallUpdate = (event: any) => {
+              // State is directly on the event, not on event.call
+              const callId = event?.callId || event?.call?.callId || event?.call?.id
 
-            // Validate that we have a call ID
-            if (!callId) {
-              console.warn('[PowerDialer] Received call event without call ID:', event)
-              return
-            }
+              // Validate that we have a call ID
+              if (!callId) {
+                console.warn('[PowerDialer] Received call event without call ID:', event)
+                return
+              }
 
-            if (callId !== sessionId) return
+              if (callId !== sessionId) return
 
-            // State is directly on event (from rtc-client emit) OR on event.call (from telnyx raw)
-            const state = event?.state || event?.call?.state
+              // State is directly on event (from rtc-client emit) OR on event.call (from telnyx raw)
+              const state = event?.state || event?.call?.state
 
-            // Validate that we have a state
-            if (!state) {
-              console.warn('[PowerDialer] Received call event without state for callId:', callId, event)
-              return
-            }
+              // Validate that we have a state
+              if (!state) {
+                console.warn('[PowerDialer] Received call event without state for callId:', callId, event)
+                return
+              }
 
-            console.log('[PowerDialer] Call state update:', state, 'for', contact.firstName, 'callId:', callId)
+              console.log('[PowerDialer] Call state update:', state, 'for', contact.firstName, 'callId:', callId)
 
-            if (state === 'active' || state === 'answering') {
-              // Call connected - first-answer-wins logic
-              console.log('[PowerDialer] 🟢 Call CONNECTED for', contact.firstName)
+              if (state === 'active' || state === 'answering') {
+                // Call connected - first-answer-wins logic
+                console.log('[PowerDialer] 🟢 Call CONNECTED for', contact.firstName)
 
-              // First, hang up all other ringing/dialing lines (first-answer-wins)
-              setCallLines(prev => {
-                const otherRingingLines = prev.filter(l =>
-                  l.callId !== sessionId &&
-                  (l.status === 'ringing' || l.status === 'dialing')
-                )
+                // First, hang up all other ringing/dialing lines (first-answer-wins)
+                setCallLines(prev => {
+                  const otherRingingLines = prev.filter(l =>
+                    l.callId !== sessionId &&
+                    (l.status === 'ringing' || l.status === 'dialing')
+                  )
 
                 // Hang up other ringing calls via WebRTC and add them to session history
                 if (otherRingingLines.length > 0) {
@@ -1425,30 +1428,34 @@ export function PowerDialerViewRedesign({ listId, listName, onBack }: PowerDiale
                   setConnectedLine(updated[connectedIdx].lineNumber)
                   setDispositionNotes('')
                 }
-                return updated
-              })
-            } else if (state === 'hangup' || state === 'destroy' || state === 'bye') {
-              // Call ended - mark as ended (waiting for disposition)
-              console.log('[PowerDialer] 🔴 Call ENDED for', contact.firstName)
-              setCallLines(prev => prev.map(line =>
-                line.callId === sessionId ? { ...line, status: 'ended' as const } : line
-              ))
-              rtcClient.off('callUpdate', handleCallUpdate)
+                  return updated
+                })
+              } else if (state === 'hangup' || state === 'destroy' || state === 'bye') {
+                // Call ended - mark as ended (waiting for disposition)
+                console.log('[PowerDialer] 🔴 Call ENDED for', contact.firstName)
+                setCallLines(prev => prev.map(line =>
+                  line.callId === sessionId ? { ...line, status: 'ended' as const } : line
+                ))
+                rtcClient.off('callUpdate', handleCallUpdate)
+              }
             }
-          }
 
-          rtcClient.on('callUpdate', handleCallUpdate)
+            rtcClient.on('callUpdate', handleCallUpdate)
           } // End of else block (AMD disabled)
 
         } catch (err: any) {
           console.error('[PowerDialer] ❌ Failed to start call:', err)
           toast.error(`Failed to call ${contact.firstName}: ${err.message}`)
           // Reset the line
-          setCallLines(prev => prev.map(line =>
-            line.contact?.id === contact.id ? { ...line, contact: null, status: 'idle' as const, callerIdNumber: undefined } : line
+          setCallLines(prev => prev.map((line, idx) =>
+            idx === lineIdx ? { ...line, contact: null, status: 'idle' as const, callerIdNumber: undefined } : line
           ))
         }
-      }
+      }) // End of callPromises.map
+
+      // Execute all calls in parallel
+      await Promise.all(callPromises)
+      console.log('[PowerDialer] ✅ All', assignments.length, 'calls initiated in parallel')
     }, 300)
   }, [maxLines, selectedCallerIds, selectedPhoneNumber]) // useCallback dependency - includes caller ID rotation
 

@@ -10,6 +10,7 @@ import { TaskUIProvider } from "@/lib/context/task-ui-context"
 import { PhoneNumberProvider } from "@/lib/context/phone-number-context"
 import { ContactPanelProvider } from "@/lib/context/contact-panel-context"
 import { MultiCallProvider, useMultiCall } from "@/lib/context/multi-call-context"
+import { GlobalCloseProvider } from "@/lib/context/global-close-context"
 import RedesignedCallPopup from "@/components/call/redesigned-call-popup"
 import MultiCallCards from "@/components/call/multi-call-cards"
 import InlineSmsPanel from "@/components/sms/inline-sms-panel"
@@ -116,27 +117,29 @@ export default function Providers({ children }: ProvidersProps) {
                     <EmailUIProvider>
                       <TaskUIProvider>
                         <ContactPanelProvider>
-                          {children}
-                          {/* Auto-register WebRTC for inbound calls */}
-                          <WebRTCAutoRegister />
-                          {/* Global events listener for toasts/notifications */}
-                          <GlobalEventsListener />
-                          {/* Global call popup (single call - existing) */}
-                          <RedesignedCallPopup />
-                          {/* Multi-call cards for manual dialer (multiple calls side-by-side) */}
-                          <MultiCallCards />
-                          {/* Inbound call notification */}
-                          <InboundCallHandler />
-                          {/* Global SMS panel */}
-                          <InlineSmsPanel />
-                          {/* Global Email panel */}
-                          <InlineEmailPanel />
-                          {/* Global Task Modal */}
-                          <GlobalTaskModal />
-                          {/* Global Contact Side Panel */}
-                          <GlobalContactPanel />
-                          {/* Inbound message notifications (SMS/Email) */}
-                          <InboundMessageToast />
+                          <GlobalCloseProvider>
+                            {children}
+                            {/* Auto-register WebRTC for inbound calls */}
+                            <WebRTCAutoRegister />
+                            {/* Global events listener for toasts/notifications */}
+                            <GlobalEventsListener />
+                            {/* Global call popup (single call - existing) */}
+                            <RedesignedCallPopup />
+                            {/* Multi-call cards for manual dialer (multiple calls side-by-side) */}
+                            <MultiCallCards />
+                            {/* Inbound call notification */}
+                            <InboundCallHandler />
+                            {/* Global SMS panel */}
+                            <InlineSmsPanel />
+                            {/* Global Email panel */}
+                            <InlineEmailPanel />
+                            {/* Global Task Modal */}
+                            <GlobalTaskModal />
+                            {/* Global Contact Side Panel */}
+                            <GlobalContactPanel />
+                            {/* Inbound message notifications (SMS/Email) */}
+                            <InboundMessageToast />
+                          </GlobalCloseProvider>
                         </ContactPanelProvider>
                       </TaskUIProvider>
                     </EmailUIProvider>

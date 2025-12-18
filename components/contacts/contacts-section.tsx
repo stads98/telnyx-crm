@@ -49,10 +49,16 @@ export default function ContactsSection() {
   const [showBulkTagOperations, setShowBulkTagOperations] = useState(false)
 
 
-  // Reset to full list on Contacts page mount to avoid carrying over filters from other tabs/pages
+  // Reset to full list on Contacts page mount ONLY if no default view is set
+  // If a default view exists, let the contacts-data-grid load it with its filters
   useEffect(() => {
-    // Always load the default, unfiltered list when visiting Contacts
-    searchContacts('', {})
+    // Check if a default view is set - if so, let the grid handle loading with view filters
+    const savedDefaultView = localStorage.getItem('contactsGridDefaultView')
+    if (!savedDefaultView || savedDefaultView === 'default') {
+      // No custom default view - load unfiltered list
+      searchContacts('', {})
+    }
+    // If a default view exists, the contacts-data-grid will load it with its saved filters
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

@@ -122,27 +122,29 @@ export async function POST(request: NextRequest) {
         // Premium AMD results: human_residence, human_business, machine, silence, fax_detected, not_sure
         // Standard AMD results: human, machine, fax, not_sure
 
-        // STRICT HUMAN DETECTION: Only connect on CONFIRMED human results
-        // This prevents false positives where voicemails are detected as humans
-        const isConfirmedHuman = amdResult === 'human_residence' ||
-                                  amdResult === 'human_business' ||
-                                  amdResult === 'human'  // Standard AMD human result
+        // INCLUSIVE HUMAN DETECTION: Connect on human results AND uncertain results
+        // "not_sure" typically means the call was answered but AMD couldn't determine
+        // It's better to connect (might be voicemail) than miss real humans
+        // The agent can always hang up if it's actually a voicemail
+        const isHumanOrUncertain = amdResult === 'human_residence' ||
+                                    amdResult === 'human_business' ||
+                                    amdResult === 'human' ||           // Standard AMD human result
+                                    amdResult === 'not_sure'           // Treat uncertain as human
 
-        // Everything else is treated as machine/voicemail to avoid false positives:
-        // - 'machine' - obvious voicemail
+        // Only definite machines/voicemails should be hung up:
+        // - 'machine' - definite voicemail greeting detected
         // - 'fax' / 'fax_detected' - fax machine
-        // - 'silence' - no audio detected (likely voicemail or dead line)
-        // - 'not_sure' - AMD couldn't determine, safer to treat as voicemail
-        //   (Real humans typically have clear speech patterns that AMD can detect)
-        const isMachineOrUncertain = amdResult?.includes('machine') ||
-                                      amdResult === 'fax' ||
-                                      amdResult === 'fax_detected' ||
-                                      amdResult === 'silence' ||
-                                      amdResult === 'not_sure'
+        // - 'silence' - no audio detected (dead line)
+        const isDefiniteMachine = amdResult?.includes('machine') ||
+                                   amdResult === 'fax' ||
+                                   amdResult === 'fax_detected' ||
+                                   amdResult === 'silence'
 
-        if (isConfirmedHuman) {
-          // CONFIRMED Human detected - mark as ready for connection
-          console.log(`[AMD WEBHOOK] ✅ CONFIRMED Human detected (${amdResult}), ready for connection`)
+        if (isHumanOrUncertain) {
+          // Human detected (or uncertain) - mark as ready for connection
+          // For "not_sure", we connect anyway - better to connect than miss humans
+          const status = amdResult === 'not_sure' ? 'uncertain (connecting anyway)' : amdResult
+          console.log(`[AMD WEBHOOK] ✅ Human/Uncertain detected (${status}), ready for connection`)
 
           // Update in-memory status for polling
           if (pendingCall) {
@@ -161,16 +163,14 @@ export async function POST(request: NextRequest) {
               }
             })
           }
-        } else if (isMachineOrUncertain) {
-          // Machine/Voicemail/Uncertain detected - hang up immediately and return to queue
-          const reason = amdResult === 'not_sure' ? 'uncertain (not_sure)' : amdResult
-          console.log(`[AMD WEBHOOK] ❌ Machine/Voicemail detected (${reason}), hanging up and returning to queue`)
+        } else if (isDefiniteMachine) {
+          // Definite Machine/Voicemail detected - hang up immediately and return to queue
+          console.log(`[AMD WEBHOOK] ❌ Definite Machine/Voicemail detected (${amdResult}), hanging up and returning to queue`)
 
           // Update in-memory status BEFORE hanging up so polling can detect it
           if (pendingCall) {
             pendingCall.status = 'voicemail'
-            pendingCall.amdResult = amdResult === 'not_sure' ? 'uncertain' :
-                                    amdResult?.includes('fax') ? 'fax' : 'machine'
+            pendingCall.amdResult = amdResult?.includes('fax') ? 'fax' : 'machine'
           }
 
           await hangupCall(callControlId)

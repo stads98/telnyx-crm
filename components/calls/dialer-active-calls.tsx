@@ -187,22 +187,25 @@ export function DialerActiveCalls({
     onMute?.(legId, newMuted.has(legId))
   }
 
-  const handleDisposition = async (legId: string, contactId: string, outcome: string) => {
-    setPendingDispositions(prev => new Set(prev).add(legId))
-    try {
-      await onDisposition?.(legId, contactId, outcome, dispositionNotes[legId])
-      setCompletedDispositions(prev => new Set(prev).add(legId))
-      toast.success(`Disposition saved: ${outcome.replace('_', ' ')}`)
-    } catch (error) {
-      toast.error('Failed to save disposition')
-    } finally {
-      setPendingDispositions(prev => {
-        const next = new Set(prev)
-        next.delete(legId)
-        return next
-      })
-    }
-  }
+	  const handleDisposition = async (legId: string, contactId: string, outcome: string) => {
+	    setPendingDispositions(prev => new Set(prev).add(legId))
+	    try {
+	      // Support both sync and async onDisposition handlers without TS warnings
+	      if (onDisposition) {
+	        await Promise.resolve(onDisposition(legId, contactId, outcome, dispositionNotes[legId]))
+	      }
+	      setCompletedDispositions(prev => new Set(prev).add(legId))
+	      toast.success(`Disposition saved: ${outcome.replace('_', ' ')}`)
+	    } catch (error) {
+	      toast.error('Failed to save disposition')
+	    } finally {
+	      setPendingDispositions(prev => {
+	        const next = new Set(prev)
+	        next.delete(legId)
+	        return next
+	      })
+	    }
+	  }
 
   // Determine grid layout based on maxLines
   const gridCols = maxLines <= 2 ? 'grid-cols-1 md:grid-cols-2'

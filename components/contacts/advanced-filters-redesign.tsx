@@ -8,7 +8,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { X, MapPin, Building2, DollarSign, Tag } from "lucide-react"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { X, MapPin, Building2, DollarSign, Tag, Calendar } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { useContacts } from "@/lib/context/contacts-context"
 import { useLocalFilters } from "@/components/calls/local-filter-wrapper"
@@ -52,6 +53,45 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
   const [minEquity, setMinEquity] = useState<string>("")
   const [maxEquity, setMaxEquity] = useState<string>("")
 
+  // Date range inputs for property sold date
+  const [soldDatePreset, setSoldDatePreset] = useState<string>("")
+  const [soldDateFrom, setSoldDateFrom] = useState<string>("")
+  const [soldDateTo, setSoldDateTo] = useState<string>("")
+
+  // Helper function to calculate date ranges for presets
+  const applyDatePreset = (preset: string) => {
+    const today = new Date()
+    let from = ""
+    let to = today.toISOString().split('T')[0]
+
+    switch (preset) {
+      case "last_week":
+        from = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        break
+      case "last_month":
+        from = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        break
+      case "last_3_months":
+        from = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        break
+      case "last_6_months":
+        from = new Date(today.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        break
+      case "last_year":
+        from = new Date(today.getTime() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        break
+      case "custom":
+        // Don't change dates for custom
+        return
+      default:
+        from = ""
+        to = ""
+    }
+
+    setSoldDateFrom(from)
+    setSoldDateTo(to)
+  }
+
   // Initialize from current filters
   useEffect(() => {
     if (currentFilters) {
@@ -60,7 +100,7 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
         if (typeof value === 'string' && value.includes(',')) {
           filters[key] = value.split(',')
         } else if (typeof value === 'string' && value.length > 0) {
-          if (!['minValue', 'maxValue', 'minEquity', 'maxEquity'].includes(key)) {
+          if (!['minValue', 'maxValue', 'minEquity', 'maxEquity', 'soldDateFrom', 'soldDateTo'].includes(key)) {
             filters[key] = [value]
           }
         }
@@ -71,6 +111,8 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
       if (currentFilters.maxValue) setMaxValue(currentFilters.maxValue)
       if (currentFilters.minEquity) setMinEquity(currentFilters.minEquity)
       if (currentFilters.maxEquity) setMaxEquity(currentFilters.maxEquity)
+      if (currentFilters.soldDateFrom) setSoldDateFrom(currentFilters.soldDateFrom)
+      if (currentFilters.soldDateTo) setSoldDateTo(currentFilters.soldDateTo)
     }
   }, [currentFilters])
 
@@ -121,6 +163,8 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
     if (maxValue !== "") filters.maxValue = maxValue
     if (minEquity !== "") filters.minEquity = minEquity
     if (maxEquity !== "") filters.maxEquity = maxEquity
+    if (soldDateFrom !== "") filters.soldDateFrom = soldDateFrom
+    if (soldDateTo !== "") filters.soldDateTo = soldDateTo
 
     // Apply filters via context (this will trigger API call with pagination)
     searchContacts('', filters)
@@ -139,6 +183,9 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
     setMaxValue("")
     setMinEquity("")
     setMaxEquity("")
+    setSoldDatePreset("")
+    setSoldDateFrom("")
+    setSoldDateTo("")
     setFilterSearchQueries({
       state: "",
       city: "",
@@ -157,11 +204,13 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
   }
 
   const hasActiveFilters = Object.values(pendingFilters).some(values => values.length > 0) ||
-    minValue !== "" || maxValue !== "" || minEquity !== "" || maxEquity !== ""
+    minValue !== "" || maxValue !== "" || minEquity !== "" || maxEquity !== "" ||
+    soldDateFrom !== "" || soldDateTo !== ""
 
   const activeFilterCount = Object.values(pendingFilters).reduce((count, values) => count + values.length, 0) +
     (minValue !== "" ? 1 : 0) + (maxValue !== "" ? 1 : 0) +
-    (minEquity !== "" ? 1 : 0) + (maxEquity !== "" ? 1 : 0)
+    (minEquity !== "" ? 1 : 0) + (maxEquity !== "" ? 1 : 0) +
+    (soldDateFrom !== "" || soldDateTo !== "" ? 1 : 0)
 
   return (
     <div className="space-y-4">
@@ -189,7 +238,7 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
 
       {/* Tabs for Filter Sections */}
       <Tabs defaultValue="location" className="w-full">
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-5">
           <TabsTrigger value="location" className="flex items-center gap-2">
             <MapPin className="h-4 w-4" />
             Location
@@ -214,6 +263,15 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
             {(minValue || maxValue || minEquity || maxEquity) ? (
               <Badge variant="secondary" className="ml-1 bg-primary/10 text-primary h-5 px-1.5 text-xs">
                 {(minValue ? 1 : 0) + (maxValue ? 1 : 0) + (minEquity ? 1 : 0) + (maxEquity ? 1 : 0)}
+              </Badge>
+            ) : null}
+          </TabsTrigger>
+          <TabsTrigger value="dates" className="flex items-center gap-2">
+            <Calendar className="h-4 w-4" />
+            Dates
+            {(soldDateFrom || soldDateTo) ? (
+              <Badge variant="secondary" className="ml-1 bg-primary/10 text-primary h-5 px-1.5 text-xs">
+                1
               </Badge>
             ) : null}
           </TabsTrigger>
@@ -404,6 +462,70 @@ export default function AdvancedFiltersRedesign({ onClose, useLocalContext = fal
                   />
                 </div>
               </div>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* Dates Tab Content */}
+        <TabsContent value="dates" className="mt-4">
+          <div className="pt-2 pb-4">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label className="text-xs font-medium text-gray-700">Property Sold Date</Label>
+                <Select
+                  value={soldDatePreset}
+                  onValueChange={(value) => {
+                    setSoldDatePreset(value)
+                    applyDatePreset(value)
+                  }}
+                >
+                  <SelectTrigger className="h-8 text-sm">
+                    <SelectValue placeholder="Select date range..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="last_week">Last Week</SelectItem>
+                    <SelectItem value="last_month">Last Month</SelectItem>
+                    <SelectItem value="last_3_months">Last 3 Months</SelectItem>
+                    <SelectItem value="last_6_months">Last 6 Months</SelectItem>
+                    <SelectItem value="last_year">Last Year</SelectItem>
+                    <SelectItem value="custom">Custom Range</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Custom date range inputs */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium text-gray-700">From Date</Label>
+                  <Input
+                    type="date"
+                    value={soldDateFrom}
+                    onChange={(e) => {
+                      setSoldDateFrom(e.target.value)
+                      setSoldDatePreset("custom")
+                    }}
+                    className="h-8 text-sm"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium text-gray-700">To Date</Label>
+                  <Input
+                    type="date"
+                    value={soldDateTo}
+                    onChange={(e) => {
+                      setSoldDateTo(e.target.value)
+                      setSoldDatePreset("custom")
+                    }}
+                    className="h-8 text-sm"
+                  />
+                </div>
+              </div>
+
+              {(soldDateFrom || soldDateTo) && (
+                <div className="text-xs text-muted-foreground">
+                  Filtering properties sold {soldDateFrom && `from ${soldDateFrom}`} {soldDateTo && `to ${soldDateTo}`}
+                </div>
+              )}
             </div>
           </div>
         </TabsContent>

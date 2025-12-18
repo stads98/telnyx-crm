@@ -52,6 +52,12 @@ export function formatPhoneNumberForTelnyx(phoneNumber: string | null | undefine
   const hasPlus = cleaned.startsWith('+');
   const digitsOnly = cleaned.replace(/\D/g, '');
 
+  // Reject phone numbers that are too long (max 15 digits for E.164)
+  if (digitsOnly.length > 15) {
+    console.warn('[formatPhoneNumberForTelnyx] Phone number too long:', phoneNumber, '-> digits:', digitsOnly.length);
+    return null;
+  }
+
   // Handle different US phone number formats
   if (digitsOnly.length === 10) {
     // Add US country code if missing (e.g., "7542947595" -> "+17542947595")
@@ -59,16 +65,16 @@ export function formatPhoneNumberForTelnyx(phoneNumber: string | null | undefine
   } else if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
     // Already has US country code (e.g., "17542947595" -> "+17542947595")
     return `+${digitsOnly}`;
-  } else if (digitsOnly.length > 11) {
+  } else if (digitsOnly.length > 11 && digitsOnly.length <= 15) {
     // International number with country code (e.g., "923312378492" -> "+923312378492")
     // If original had +, it's definitely international; if not but > 11 digits, assume international
     return `+${digitsOnly}`;
-  } else if (digitsOnly.length > 0 && hasPlus) {
-    // Has + but fewer than expected digits - still try to format it
+  } else if (digitsOnly.length >= 7 && hasPlus) {
+    // Has + but fewer than expected digits - still try to format it (min 7 for small countries)
     return `+${digitsOnly}`;
   }
 
-  // Invalid phone number
+  // Invalid phone number (too short or doesn't meet criteria)
   return null;
 }
 
@@ -78,8 +84,10 @@ export function formatPhoneNumberForTelnyx(phoneNumber: string | null | undefine
  * @returns true if valid E.164 format
  */
 export function isValidE164PhoneNumber(phoneNumber: string): boolean {
-  // E.164 format: + followed by up to 15 digits
-  const e164Regex = /^\+[1-9]\d{1,14}$/;
+  // E.164 format: + followed by 7-15 digits (country code + number)
+  // 7 digits minimum (e.g., +1234567 for small countries)
+  // 15 digits maximum per ITU-T E.164 standard
+  const e164Regex = /^\+[1-9]\d{6,14}$/;
   return e164Regex.test(stripBidiAndZeroWidth(phoneNumber));
 }
 

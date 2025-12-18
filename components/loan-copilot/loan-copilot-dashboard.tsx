@@ -59,12 +59,16 @@ export default function LoanCopilotDashboard({ deal, onDealUpdated }: LoanCopilo
               <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
                 <span className="flex items-center gap-1">
                   <User className="h-3.5 w-3.5" />
-                  <ContactName
-                    contactId={deal.contactId}
-                    contact={{ id: deal.contactId, fullName: deal.contactName }}
-                    clickMode="popup"
-                    className="text-sm"
-                  />
+                  {deal.contactId ? (
+                    <ContactName
+                      contactId={deal.contactId}
+                      contact={{ id: deal.contactId, fullName: deal.contactName } as any}
+                      clickMode="popup"
+                      className="text-sm"
+                    />
+                  ) : (
+                    <span className="text-muted-foreground">{deal.contactName || 'No Contact'}</span>
+                  )}
                 </span>
                 {deal.propertyAddress && (
                   <span className="flex items-center gap-1">
@@ -278,11 +282,23 @@ export default function LoanCopilotDashboard({ deal, onDealUpdated }: LoanCopilo
             </TabsContent>
 
             <TabsContent value="tasks" className="mt-0 h-full">
-              <LoanTasks dealId={deal.id} contactId={deal.contactId} />
+              {deal.contactId ? (
+                <LoanTasks dealId={deal.id} contactId={deal.contactId} />
+              ) : (
+                <div className="text-center text-muted-foreground py-12">
+                  No contact associated with this loan. Please link a contact first.
+                </div>
+              )}
             </TabsContent>
 
             <TabsContent value="communications" className="mt-0 h-full">
-              <LoanCommunications dealId={deal.id} contactId={deal.contactId} />
+              {deal.contactId ? (
+                <LoanCommunications dealId={deal.id} contactId={deal.contactId} />
+              ) : (
+                <div className="text-center text-muted-foreground py-12">
+                  No contact associated with this loan. Please link a contact first.
+                </div>
+              )}
             </TabsContent>
 
             <TabsContent value="dscr" className="mt-0 h-full">

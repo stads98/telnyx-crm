@@ -5,7 +5,7 @@ import { useContacts } from "@/lib/context/contacts-context"
 import EnhancedConversationsList from "@/components/text/enhanced-conversations-list"
 import EnhancedConversation from "@/components/text/enhanced-conversation"
 import NewConversationView from "@/components/text/new-conversation-view"
-import TextBlastQueue from "@/components/text/text-blast-queue"
+import { TextPowerDialer } from "@/components/text/text-power-dialer"
 import TextBlastOperations from "@/components/text/text-blast-operations"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useMediaQuery } from "@/hooks/use-media-query"
@@ -191,8 +191,8 @@ export default function TextCenter({ selectedContactId }: TextCenterProps) {
               )}
             </div>
           </TabsContent>
-          <TabsContent value="blast" className="m-0 h-full p-6 overflow-auto">
-            <TextBlastQueue />
+          <TabsContent value="blast" className="m-0 h-full overflow-hidden">
+            <TextPowerDialer onBack={() => handleSetActiveTab('conversations')} />
           </TabsContent>
           <TabsContent value="operations" className="m-0 h-full overflow-auto">
             <TextBlastOperations onSwitchTab={handleSetActiveTab} />

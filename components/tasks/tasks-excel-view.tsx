@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   useReactTable,
   getCoreRowModel,
@@ -38,6 +38,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Calendar } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Plus,
   Search,
@@ -51,10 +52,17 @@ import {
   ChevronsUpDown,
   Loader2,
   CheckCircle2,
+  CheckCircle,
   Circle,
   Clock,
   Settings2,
   GripVertical,
+  X,
+  Save,
+  Tag as TagIcon,
+  History,
+  FileText,
+  Edit,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -76,6 +84,7 @@ import { useEmailUI } from '@/lib/context/email-ui-context';
 import { useMakeCall } from '@/hooks/use-make-call';
 import { useContactPanel } from '@/lib/context/contact-panel-context';
 import { normalizePropertyType } from '@/lib/property-type-mapper';
+import { useGlobalCache } from '@/lib/stores/useGlobalCache';
 import { CallButtonWithCellHover } from '@/components/ui/call-button-with-cell-hover';
 
 interface TaskTag {
@@ -124,6 +133,22 @@ interface Contact {
   zip?: string;
   propertyType?: string;
 }
+
+interface ActivityHistoryItem {
+  id: string;
+  type: 'call' | 'sms' | 'email' | 'activity' | 'sequence' | 'tag_added' | 'tag_removed' | 'task';
+  title: string;
+  description?: string;
+  direction?: 'inbound' | 'outbound';
+  status?: string;
+  timestamp: string;
+  isPinned?: boolean;
+  activityId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+// Activity history cache
+const activityHistoryCache = new Map<string, { items: ActivityHistoryItem[]; loading: boolean; timestamp: number }>();
 
 // Separate component for editable description to avoid table re-renders
 function EditableDescriptionCell({ taskId, initialValue, onSave }: { taskId: string; initialValue: string; onSave: (value: string) => Promise<void> }) {
@@ -237,6 +262,329 @@ function EditableSubjectCell({ taskId, initialValue, onSave }: { taskId: string;
   );
 }
 
+// Activity History Cell Component with hover popover
+function ActivityHistoryCell({ contactId, contactName }: { contactId?: string; contactName?: string }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [items, setItems] = useState<ActivityHistoryItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [editingNote, setEditingNote] = useState<string | null>(null);
+  const [editNoteValue, setEditNoteValue] = useState('');
+  const [isAddingNote, setIsAddingNote] = useState(false);
+  const [newNoteValue, setNewNoteValue] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
+
+  const fetchHistory = async () => {
+    if (!contactId) return;
+
+    // Check cache first
+    const cached = activityHistoryCache.get(contactId);
+    if (cached && Date.now() - cached.timestamp < 60000) { // 1 minute cache
+      setItems(cached.items);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/activity-history?limit=50`);
+      if (res.ok) {
+        const data = await res.json();
+        const historyItems = data.items || [];
+        setItems(historyItems);
+        activityHistoryCache.set(contactId, { items: historyItems, loading: false, timestamp: Date.now() });
+      }
+    } catch (error) {
+      console.error('Error fetching activity history:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveNote = async (activityId: string) => {
+    setSavingNote(true);
+    try {
+      const res = await fetch(`/api/activities/${activityId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: editNoteValue }),
+      });
+      if (res.ok) {
+        // Update local state
+        setItems(prev => prev.map(item =>
+          item.activityId === activityId ? { ...item, description: editNoteValue } : item
+        ));
+        // Invalidate cache
+        activityHistoryCache.delete(contactId || '');
+        setEditingNote(null);
+        toast.success('Note updated');
+      } else {
+        toast.error('Failed to update note');
+      }
+    } catch (error) {
+      console.error('Error saving note:', error);
+      toast.error('Failed to save note');
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const handleAddNewNote = async () => {
+    if (!contactId || !newNoteValue.trim()) return;
+    setSavingNote(true);
+    try {
+      const res = await fetch('/api/activities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contactId,
+          type: 'note',
+          title: 'Note',
+          description: newNoteValue.trim(),
+          status: 'completed',
+        }),
+      });
+      if (res.ok) {
+        // Invalidate cache and refetch
+        activityHistoryCache.delete(contactId);
+        await fetchHistory();
+        setIsAddingNote(false);
+        setNewNoteValue('');
+        toast.success('Note added');
+      } else {
+        toast.error('Failed to add note');
+      }
+    } catch (error) {
+      console.error('Error adding note:', error);
+      toast.error('Failed to add note');
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const getTypeIcon = (type: string) => {
+    switch (type) {
+      case 'call': return <Phone className="h-3 w-3" />;
+      case 'sms': return <MessageSquare className="h-3 w-3" />;
+      case 'email': return <Mail className="h-3 w-3" />;
+      case 'activity': return <FileText className="h-3 w-3" />;
+      case 'note': return <FileText className="h-3 w-3" />;
+      case 'task': return <CheckCircle className="h-3 w-3" />;
+      default: return <Clock className="h-3 w-3" />;
+    }
+  };
+
+  const getTypeColor = (type: string) => {
+    switch (type) {
+      case 'call': return 'text-green-600';
+      case 'sms': return 'text-blue-600';
+      case 'email': return 'text-purple-600';
+      case 'activity': return 'text-orange-600';
+      case 'note': return 'text-orange-600';
+      case 'task': return 'text-yellow-600';
+      default: return 'text-gray-600';
+    }
+  };
+
+  // Find the latest note to show as preview
+  const latestNote = items.find(item => (item.type === 'activity' || item.type === 'note') && item.description);
+  const noteCount = items.filter(item => item.type === 'activity' || item.type === 'note').length;
+
+  if (!contactId) {
+    return <span className="text-muted-foreground text-xs">-</span>;
+  }
+
+  return (
+    <Popover open={isOpen} onOpenChange={(open) => {
+      setIsOpen(open);
+      if (open) fetchHistory();
+      if (!open) {
+        setIsAddingNote(false);
+        setEditingNote(null);
+      }
+    }}>
+      <PopoverTrigger asChild>
+        <div
+          className="flex items-center gap-1 cursor-pointer hover:bg-accent/50 rounded px-1 py-0.5 min-h-[24px] max-w-full"
+          title={latestNote?.description ? `Latest: ${latestNote.description}` : 'Click to view activity history'}
+        >
+          <History className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+          {latestNote?.description ? (
+            <span className="text-xs text-muted-foreground truncate max-w-[80px]">
+              {latestNote.description.substring(0, 30)}{latestNote.description.length > 30 ? '...' : ''}
+            </span>
+          ) : items.length > 0 ? (
+            <span className="text-xs text-muted-foreground">{items.length}</span>
+          ) : (
+            <span className="text-xs text-muted-foreground">View</span>
+          )}
+        </div>
+      </PopoverTrigger>
+      <PopoverContent className="w-[450px] p-0 z-[100]" align="start" side="right" sideOffset={5}>
+        <div className="p-3 border-b flex items-center justify-between">
+          <div>
+            <h4 className="font-medium text-sm">Activity History</h4>
+            <p className="text-xs text-muted-foreground">{contactName || 'Contact'} • {items.length} items</p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => setIsAddingNote(true)}
+          >
+            <Plus className="h-3 w-3 mr-1" />
+            Add Note
+          </Button>
+        </div>
+
+        {/* Add new note section */}
+        {isAddingNote && (
+          <div className="p-3 border-b bg-accent/30">
+            <Textarea
+              value={newNoteValue}
+              onChange={(e) => setNewNoteValue(e.target.value)}
+              placeholder="Enter your note here... (supports multiple lines with bullets using '-')"
+              className="min-h-[80px] text-sm mb-2"
+              autoFocus
+            />
+            <div className="flex gap-2 justify-end">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-xs"
+                onClick={() => {
+                  setIsAddingNote(false);
+                  setNewNoteValue('');
+                }}
+                disabled={savingNote}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="default"
+                className="h-7 text-xs"
+                onClick={handleAddNewNote}
+                disabled={savingNote || !newNoteValue.trim()}
+              >
+                {savingNote ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Save className="h-3 w-3 mr-1" />}
+                Save Note
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <ScrollArea className="h-[350px]">
+          {loading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+              <History className="h-8 w-8 mb-2" />
+              <p className="text-sm">No activity history</p>
+              <Button
+                size="sm"
+                variant="link"
+                className="text-xs mt-2"
+                onClick={() => setIsAddingNote(true)}
+              >
+                Add the first note
+              </Button>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {items.map((item) => (
+                <div key={item.id} className="p-3 hover:bg-accent/30">
+                  <div className="flex items-start gap-2">
+                    <div className={cn('mt-0.5', getTypeColor(item.type))}>
+                      {getTypeIcon(item.type)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium truncate">{item.title}</span>
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">
+                          {format(new Date(item.timestamp), 'MMM d, h:mm a')}
+                        </span>
+                      </div>
+                      {item.direction && (
+                        <Badge variant="outline" className="text-[10px] mt-1">
+                          {item.direction}
+                        </Badge>
+                      )}
+                      {editingNote === item.activityId ? (
+                        <div className="mt-2">
+                          <Textarea
+                            value={editNoteValue}
+                            onChange={(e) => setEditNoteValue(e.target.value)}
+                            placeholder="Edit note... (supports multiple lines with bullets using '-')"
+                            className="min-h-[80px] text-sm"
+                            autoFocus
+                          />
+                          <div className="flex gap-2 mt-2 justify-end">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 text-xs"
+                              onClick={() => setEditingNote(null)}
+                              disabled={savingNote}
+                            >
+                              Cancel
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="default"
+                              className="h-7 text-xs"
+                              onClick={() => handleSaveNote(item.activityId!)}
+                              disabled={savingNote}
+                            >
+                              {savingNote ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Save className="h-3 w-3 mr-1" />}
+                              Save
+                            </Button>
+                          </div>
+                        </div>
+                      ) : item.description ? (
+                        <div className="mt-1 group relative">
+                          <p className="text-xs text-muted-foreground whitespace-pre-wrap">
+                            {item.description}
+                          </p>
+                          {(item.type === 'activity' || item.type === 'note') && item.activityId && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-5 text-[10px] px-1.5 mt-1 opacity-60 hover:opacity-100"
+                              onClick={() => {
+                                setEditingNote(item.activityId!);
+                                setEditNoteValue(item.description || '');
+                              }}
+                            >
+                              <Edit className="h-2.5 w-2.5 mr-1" />
+                              Edit
+                            </Button>
+                          )}
+                        </div>
+                      ) : (item.type === 'activity' || item.type === 'note') && item.activityId ? (
+                        <button
+                          className="text-xs text-blue-600 hover:underline mt-1 flex items-center gap-1"
+                          onClick={() => {
+                            setEditingNote(item.activityId!);
+                            setEditNoteValue('');
+                          }}
+                        >
+                          <Plus className="h-3 w-3" />
+                          Add note
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </ScrollArea>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export default function TasksExcelView() {
   // Global UI contexts
   const { openTask, setOnTaskCreated } = useTaskUI();
@@ -244,6 +592,10 @@ export default function TasksExcelView() {
   const { openEmail } = useEmailUI();
   const { makeCall } = useMakeCall();
   const { openContactPanel } = useContactPanel();
+
+  // Global cache for instant loading
+  const globalCache = useGlobalCache();
+  const initialLoadDone = useRef(false);
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -328,11 +680,28 @@ export default function TasksExcelView() {
   const [assignedUserFilter, setAssignedUserFilter] = useState<string[]>([]); // Empty = all users, multi-select
   const [users, setUsers] = useState<UserOption[]>([]);
 
+  // Available tags for tag editing
+  const [availableTags, setAvailableTags] = useState<TaskTag[]>([]);
+
   useEffect(() => {
     loadData();
     loadSavedViews();
     loadUsers();
+    loadAvailableTags();
   }, []);
+
+  // Load available tags
+  const loadAvailableTags = async () => {
+    try {
+      const res = await fetch('/api/tags');
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableTags(data.tags || []);
+      }
+    } catch (error) {
+      console.error('Error loading tags:', error);
+    }
+  };
 
   // Load users for filter dropdown
   const loadUsers = async () => {
@@ -573,44 +942,59 @@ export default function TasksExcelView() {
 
   const loadData = async (forceRefresh = false) => {
     try {
-      setIsLoading(true);
+      // INSTANT LOAD: Use cached data immediately if available
+      const cachedTasks = globalCache.getCached<Task[]>('tasks');
+      const cachedContacts = globalCache.getCached<Contact[]>('contacts');
 
-      // No caching for contacts - large datasets can exceed sessionStorage quota
+      if (cachedTasks && cachedTasks.length > 0 && !forceRefresh) {
+        setTasks(cachedTasks);
+        setIsLoading(false);
+        // Background refresh if cache is stale
+        if (!globalCache.isCacheFresh('tasks')) {
+          fetchFreshData(false); // Don't show loading for background refresh
+        }
+        if (cachedContacts) setContacts(cachedContacts);
+        return;
+      }
+
+      setIsLoading(true);
+      await fetchFreshData(true);
+    } catch (error) {
+      console.error('Error loading data:', error);
+      toast.error('Failed to load data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchFreshData = async (showLoading: boolean) => {
+    try {
       const [tasksRes, contactsRes, taskTypesRes] = await Promise.all([
-        fetch('/api/tasks', { cache: 'no-store' }), // Always fresh tasks
+        fetch('/api/tasks', { cache: 'no-store' }),
         fetch('/api/contacts?limit=1000', { cache: 'force-cache' }),
         fetch('/api/settings/task-types', { cache: 'force-cache' }),
       ]);
 
       if (tasksRes.ok) {
         const tasksData = await tasksRes.json();
-        console.log('Tasks loaded:', tasksData.tasks?.length || 0);
-        setTasks(tasksData.tasks || []);
-      } else {
-        console.error('Failed to load tasks:', tasksRes.status);
+        const tasksList = tasksData.tasks || [];
+        setTasks(tasksList);
+        globalCache.setTasks(tasksList); // Update global cache
       }
 
       if (contactsRes && contactsRes.ok) {
         const contactsData = await contactsRes.json();
         const contactsList = contactsData.contacts || [];
-        console.log('Contacts loaded:', contactsList.length || 0);
         setContacts(contactsList);
-      } else {
-        console.error('Failed to load contacts:', contactsRes?.status);
+        globalCache.setContacts(contactsList); // Update global cache
       }
 
       if (taskTypesRes.ok) {
         const taskTypesData = await taskTypesRes.json();
-        console.log('Task types loaded:', taskTypesData.taskTypes?.length || 0);
         setSavedTaskTypes(taskTypesData.taskTypes || []);
-      } else {
-        console.error('Failed to load task types:', taskTypesRes.status);
       }
     } catch (error) {
-      console.error('Error loading data:', error);
-      toast.error('Failed to load data');
-    } finally {
-      setIsLoading(false);
+      console.error('Error fetching fresh data:', error);
     }
   };
 
@@ -672,6 +1056,8 @@ export default function TasksExcelView() {
           t.id === taskId ? { ...t, status: newStatus } : t
         )
       );
+      // Also update global cache for instant cross-page updates
+      globalCache.updateTask(taskId, { status: newStatus });
 
       // Show instant feedback
       toast.success(`Task marked as ${newStatus}`, {
@@ -693,6 +1079,7 @@ export default function TasksExcelView() {
             t.id === taskId ? { ...t, status: revertStatus } : t
           )
         );
+        globalCache.updateTask(taskId, { status: revertStatus });
         toast.error('Failed to update task');
         return;
       }
@@ -848,6 +1235,7 @@ export default function TasksExcelView() {
     contactState: 'State',
     contactZip: 'ZIP',
     propertyType: 'Property Type',
+    activityHistory: 'Activity History',
     actions: 'Actions',
   };
 
@@ -1389,31 +1777,124 @@ export default function TasksExcelView() {
         header: 'Tags',
         cell: ({ row }) => {
           const tags = row.original.tags || [];
-          if (tags.length === 0) {
-            return <span className="text-muted-foreground">-</span>;
-          }
+          const [tagPopoverOpen, setTagPopoverOpen] = React.useState(false);
+          const [tagSearch, setTagSearch] = React.useState('');
+          const [selectedTagIds, setSelectedTagIds] = React.useState<string[]>(
+            tags.map((t: TaskTag) => t.id)
+          );
+
+          // Sync selectedTagIds when tags change
+          React.useEffect(() => {
+            setSelectedTagIds(tags.map((t: TaskTag) => t.id));
+          }, [tags]);
+
+          const filteredTags = React.useMemo(() => {
+            if (!tagSearch) return availableTags;
+            return availableTags.filter(t =>
+              t.name.toLowerCase().includes(tagSearch.toLowerCase())
+            );
+          }, [tagSearch]);
+
+          const handleTagToggle = async (tagId: string, checked: boolean) => {
+            try {
+              const newSelectedIds = checked
+                ? [...selectedTagIds, tagId]
+                : selectedTagIds.filter(id => id !== tagId);
+
+              setSelectedTagIds(newSelectedIds);
+
+              const selectedTags = availableTags.filter(t => newSelectedIds.includes(t.id));
+              const response = await fetch(`/api/tasks/${row.original.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tags: selectedTags.map(t => ({ id: t.id, name: t.name, color: t.color }))
+                }),
+              });
+              if (response.ok) {
+                toast.success('Tag updated');
+                setTasks(prevTasks =>
+                  prevTasks.map(task =>
+                    task.id === row.original.id
+                      ? { ...task, tags: selectedTags }
+                      : task
+                  )
+                );
+              }
+            } catch (error) {
+              toast.error('Failed to update tag');
+            }
+          };
+
           return (
-            <div className="flex flex-wrap gap-1">
-              {tags.slice(0, 3).map((tag) => (
-                <Badge
-                  key={tag.id}
-                  variant="outline"
-                  style={{
-                    backgroundColor: `${tag.color}20`,
-                    borderColor: tag.color,
-                    color: tag.color,
-                  }}
-                  className="text-xs"
-                >
-                  {tag.name}
-                </Badge>
-              ))}
-              {tags.length > 3 && (
-                <Badge variant="outline" className="text-xs">
-                  +{tags.length - 3}
-                </Badge>
-              )}
-            </div>
+            <Popover open={tagPopoverOpen} onOpenChange={setTagPopoverOpen}>
+              <PopoverTrigger asChild>
+                <div className="flex flex-wrap gap-1 cursor-pointer min-h-[24px] hover:bg-accent/50 rounded px-1 py-0.5">
+                  {tags.length === 0 ? (
+                    <span className="text-muted-foreground text-xs flex items-center gap-1">
+                      <Plus className="h-3 w-3" /> Add tag
+                    </span>
+                  ) : (
+                    <>
+                      {tags.slice(0, 2).map((tag: TaskTag) => (
+                        <Badge
+                          key={tag.id}
+                          variant="outline"
+                          style={{
+                            backgroundColor: `${tag.color}20`,
+                            borderColor: tag.color,
+                            color: tag.color,
+                          }}
+                          className="text-xs"
+                        >
+                          {tag.name}
+                        </Badge>
+                      ))}
+                      {tags.length > 2 && (
+                        <Badge variant="outline" className="text-xs">
+                          +{tags.length - 2}
+                        </Badge>
+                      )}
+                    </>
+                  )}
+                </div>
+              </PopoverTrigger>
+              <PopoverContent className="w-64 p-2" align="start">
+                <div className="space-y-2">
+                  <Input
+                    placeholder="Search tags..."
+                    value={tagSearch}
+                    onChange={(e) => setTagSearch(e.target.value)}
+                    className="h-8"
+                    autoFocus
+                  />
+                  <ScrollArea className="h-48">
+                    <div className="space-y-1">
+                      {filteredTags.map((tag) => (
+                        <div
+                          key={tag.id}
+                          className="flex items-center gap-2 p-1.5 hover:bg-accent rounded cursor-pointer"
+                          onClick={() => handleTagToggle(tag.id, !selectedTagIds.includes(tag.id))}
+                        >
+                          <Checkbox
+                            checked={selectedTagIds.includes(tag.id)}
+                            onCheckedChange={(checked) => handleTagToggle(tag.id, !!checked)}
+                          />
+                          <div
+                            className="w-3 h-3 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: tag.color }}
+                          />
+                          <span className="text-sm truncate">{tag.name}</span>
+                        </div>
+                      ))}
+                      {filteredTags.length === 0 && (
+                        <p className="text-sm text-muted-foreground text-center py-2">No tags found</p>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+              </PopoverContent>
+            </Popover>
           );
         },
         size: 180,
@@ -1479,6 +1960,21 @@ export default function TasksExcelView() {
             <Badge variant="outline">{normalizePropertyType(contact.propertyType)}</Badge>
           ) : (
             <span className="text-muted-foreground">-</span>
+          );
+        },
+        size: 150,
+      },
+      {
+        id: 'activityHistory',
+        header: 'Activity History',
+        cell: ({ row }) => {
+          const contact = contacts.find((c) => c.id === row.original.contactId);
+          const contactName = row.original.contactName || `${contact?.firstName || ''} ${contact?.lastName || ''}`.trim();
+          return (
+            <ActivityHistoryCell
+              contactId={row.original.contactId}
+              contactName={contactName}
+            />
           );
         },
         size: 150,
@@ -2065,7 +2561,7 @@ export default function TasksExcelView() {
               Default View {defaultView === 'default' && '⭐'}
             </DropdownMenuCheckboxItem>
             <DropdownMenuSeparator />
-            <div className="p-2">
+            <div className="p-2 space-y-2">
               <Button
                 variant="outline"
                 size="sm"
@@ -2078,6 +2574,28 @@ export default function TasksExcelView() {
                 <Plus className="h-4 w-4 mr-2" />
                 Save Current View
               </Button>
+              {currentView === 'default' && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => {
+                    // Save current state as the default view state
+                    const currentState = {
+                      columnVisibility,
+                      columnSizing,
+                      columnFilters,
+                      sorting,
+                      columnOrder,
+                    };
+                    localStorage.setItem('tasks_default_view_state', JSON.stringify(currentState));
+                    toast.success('Current settings saved as default');
+                  }}
+                >
+                  <Save className="h-4 w-4 mr-2" />
+                  Save as Default
+                </Button>
+              )}
             </div>
             {savedViews.length > 0 && (
               <>

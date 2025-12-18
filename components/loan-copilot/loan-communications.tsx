@@ -48,11 +48,14 @@ export default function LoanCommunications({ dealId, contactId }: LoanCommunicat
   const { openEmail } = useEmailUI();
 
   useEffect(() => {
-    loadCommunications();
-    loadContact();
+    if (contactId) {
+      loadCommunications();
+      loadContact();
+    }
   }, [contactId]);
 
   const loadContact = async () => {
+    if (!contactId) return;
     try {
       const res = await fetch(`/api/contacts/${contactId}`);
       if (res.ok) {
@@ -71,6 +74,7 @@ export default function LoanCommunications({ dealId, contactId }: LoanCommunicat
   };
 
   const loadCommunications = async () => {
+    if (!contactId) return;
     try {
       setLoading(true);
       const res = await fetch(`/api/activities?contactId=${contactId}&limit=50`);

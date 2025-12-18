@@ -11,6 +11,23 @@ import { Badge } from '@/components/ui/badge';
 import { Plus, Trash2, GripVertical, Loader2, Pencil, Star } from 'lucide-react';
 import { toast } from 'sonner';
 import { Pipeline, PipelineStage } from '@/types/deals';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 interface PipelineManagementDialogProps {
   open: boolean;
@@ -23,6 +40,67 @@ const STAGE_COLORS = [
   '#6B7280', '#EF4444', '#F97316', '#F59E0B', '#84CC16', '#22C55E',
   '#10B981', '#06B6D4', '#3B82F6', '#6366F1', '#8B5CF6', '#EC4899'
 ];
+
+// Sortable Stage Item Component
+function SortableStageItem({
+  stage,
+  onDelete
+}: {
+  stage: PipelineStage;
+  onDelete: (id: string) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: stage.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50 bg-white"
+    >
+      <div className="flex items-center gap-3">
+        <div
+          {...attributes}
+          {...listeners}
+          className="cursor-grab active:cursor-grabbing touch-none"
+        >
+          <GripVertical className="h-4 w-4 text-gray-400" />
+        </div>
+        <div
+          className="w-4 h-4 rounded"
+          style={{ backgroundColor: stage.color || '#6B7280' }}
+        />
+        <span>{stage.label || stage.name}</span>
+        {stage.isClosedStage && (
+          <Badge variant="outline" className="text-xs text-green-600">Won</Badge>
+        )}
+        {stage.isLostStage && (
+          <Badge variant="outline" className="text-xs text-red-600">Lost</Badge>
+        )}
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="text-red-600 hover:text-red-700"
+        onClick={() => onDelete(stage.id)}
+      >
+        <Trash2 className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
 
 export default function PipelineManagementDialog({
   open,
@@ -46,12 +124,57 @@ export default function PipelineManagementDialog({
   const [newStageName, setNewStageName] = useState('');
   const [newStageColor, setNewStageColor] = useState('#6B7280');
 
+  // DnD sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
   useEffect(() => {
     if (selectedPipelineId) {
       const pipeline = pipelines.find(p => p.id === selectedPipelineId);
       setStages(pipeline?.stages || []);
     }
   }, [selectedPipelineId, pipelines]);
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+
+    if (!over || active.id === over.id || !selectedPipelineId) return;
+
+    const oldIndex = stages.findIndex(s => s.id === active.id);
+    const newIndex = stages.findIndex(s => s.id === over.id);
+
+    if (oldIndex === -1 || newIndex === -1) return;
+
+    // Optimistically update UI
+    const newStages = arrayMove(stages, oldIndex, newIndex);
+    setStages(newStages);
+
+    // Save to server
+    try {
+      const res = await fetch(`/api/pipelines/${selectedPipelineId}/stages`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stageIds: newStages.map(s => s.id) }),
+      });
+
+      if (res.ok) {
+        toast.success('Stage order updated');
+        onPipelinesChange();
+      } else {
+        // Revert on error
+        setStages(stages);
+        toast.error('Failed to update stage order');
+      }
+    } catch (error) {
+      // Revert on error
+      setStages(stages);
+      toast.error('Failed to update stage order');
+    }
+  };
 
   const handleCreatePipeline = async () => {
     if (!newPipelineName.trim()) {
@@ -343,38 +466,29 @@ export default function PipelineManagementDialog({
                   </div>
                 </div>
 
-                {/* Existing Stages */}
+                {/* Existing Stages with Drag and Drop */}
                 <div className="space-y-2">
-                  <h4 className="font-medium">Pipeline Stages</h4>
-                  {stages.map((stage, index) => (
-                    <div
-                      key={stage.id}
-                      className="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50"
+                  <h4 className="font-medium">Pipeline Stages (drag to reorder)</h4>
+                  <DndContext
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <SortableContext
+                      items={stages.map(s => s.id)}
+                      strategy={verticalListSortingStrategy}
                     >
-                      <div className="flex items-center gap-3">
-                        <GripVertical className="h-4 w-4 text-gray-400" />
-                        <div
-                          className="w-4 h-4 rounded"
-                          style={{ backgroundColor: stage.color || '#6B7280' }}
-                        />
-                        <span>{stage.label || stage.name}</span>
-                        {stage.isClosedStage && (
-                          <Badge variant="outline" className="text-xs text-green-600">Won</Badge>
-                        )}
-                        {stage.isLostStage && (
-                          <Badge variant="outline" className="text-xs text-red-600">Lost</Badge>
-                        )}
+                      <div className="space-y-2">
+                        {stages.map((stage) => (
+                          <SortableStageItem
+                            key={stage.id}
+                            stage={stage}
+                            onDelete={handleDeleteStage}
+                          />
+                        ))}
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-red-600 hover:text-red-700"
-                        onClick={() => handleDeleteStage(stage.id)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  ))}
+                    </SortableContext>
+                  </DndContext>
                 </div>
               </>
             )}

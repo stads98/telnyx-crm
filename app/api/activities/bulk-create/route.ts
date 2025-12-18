@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db'
 import { z } from 'zod'
 import { getServerSession } from 'next-auth/next'
 import { authOptions } from '@/lib/auth'
+import { ActivityType } from '@prisma/client'
 
 // Schema for validating bulk activity creation
 const bulkCreateSchema = z.object({
@@ -72,7 +73,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Map the type to lowercase for database
-    const typeMap: Record<string, string> = {
+    const typeMap: { [key: string]: ActivityType } = {
       'Call': 'call',
       'Email': 'email',
       'Meeting': 'meeting',
@@ -80,9 +81,75 @@ export async function POST(request: NextRequest) {
       'Task': 'task',
       'Note': 'note',
     }
-    const dbType = typeMap[validatedData.type] || 'task'
+    const dbType = (typeMap[validatedData.type] || 'task') as ActivityType
 
-    // Create activities for all contacts
+    // Check if title contains dynamic fields
+    const hasDynamicFields = /\{\{(firstName|lastName|propertyAddress|city|state|zipCode|phone1|email1)\}\}/i.test(validatedData.title)
+
+    if (hasDynamicFields) {
+      // Fetch contact data for dynamic field substitution
+      const contacts = await prisma.contact.findMany({
+        where: { id: { in: contactIds } },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          propertyAddress: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          phone1: true,
+          email1: true,
+        }
+      })
+
+      // Create a map for quick lookup
+      const contactMap = new Map(contacts.map(c => [c.id, c]))
+
+      // Helper function to substitute dynamic fields
+      const substituteFields = (template: string, contact: typeof contacts[0]) => {
+        return template
+          .replace(/\{\{firstName\}\}/gi, contact.firstName || '')
+          .replace(/\{\{lastName\}\}/gi, contact.lastName || '')
+          .replace(/\{\{propertyAddress\}\}/gi, contact.propertyAddress || '')
+          .replace(/\{\{city\}\}/gi, contact.city || '')
+          .replace(/\{\{state\}\}/gi, contact.state || '')
+          .replace(/\{\{zipCode\}\}/gi, contact.zipCode || '')
+          .replace(/\{\{phone1\}\}/gi, contact.phone1 || '')
+          .replace(/\{\{email1\}\}/gi, contact.email1 || '')
+          .trim()
+      }
+
+      // Create activities individually with substituted titles
+      const createPromises = contactIds.map(contactId => {
+        const contact = contactMap.get(contactId)
+        const title = contact ? substituteFields(validatedData.title, contact) : validatedData.title
+
+        return prisma.activity.create({
+          data: {
+            contact_id: contactId,
+            type: dbType,
+            task_type: validatedData.type,
+            title,
+            description: validatedData.notes || null,
+            due_date: validatedData.dueDate ? new Date(validatedData.dueDate) : null,
+            status: 'planned',
+            priority: 'medium',
+            created_by: creatorId,
+          }
+        })
+      })
+
+      const results = await Promise.all(createPromises)
+
+      return NextResponse.json({
+        success: true,
+        count: results.length,
+        message: `Created ${results.length} tasks`
+      })
+    }
+
+    // No dynamic fields - use createMany for efficiency
     const activities = await prisma.activity.createMany({
       data: contactIds.map(contactId => ({
         contact_id: contactId,

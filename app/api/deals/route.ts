@@ -13,6 +13,11 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '100');
     const offset = parseInt(searchParams.get('offset') || '0');
 
+    // Status filters - when true, include these deals; when false/null, exclude them
+    const showWon = searchParams.get('showWon');
+    const showLost = searchParams.get('showLost');
+    const showArchived = searchParams.get('showArchived');
+
     // Build where clause
     const where: any = {};
 
@@ -36,6 +41,44 @@ export async function GET(request: NextRequest) {
 
     if (isLoanDeal !== null && isLoanDeal !== undefined) {
       where.isLoanDeal = isLoanDeal === 'true';
+    }
+
+    // Build stage filter based on won/lost filters
+    // If none are selected, show only active (non-won, non-lost) deals
+    // If any are selected, include those statuses
+
+    // Check if any status filter is active
+    const wonActive = showWon === 'true';
+    const lostActive = showLost === 'true';
+
+    // If no filters are active, show only active deals (exclude won and lost)
+    // If specific filters are active, show only those
+    if (!wonActive && !lostActive) {
+      // Show only active deals - exclude won and lost stages
+      // Use NOT to exclude closed and lost stages
+      where.OR = [
+        { dealStage: null }, // Deals without a stage
+        {
+          dealStage: {
+            isClosedStage: { not: true },
+            isLostStage: { not: true }
+          }
+        }
+      ];
+    } else {
+      // Build filter based on active toggles
+      const orConditions: any[] = [];
+
+      if (wonActive) {
+        orConditions.push({ dealStage: { isClosedStage: true } });
+      }
+      if (lostActive) {
+        orConditions.push({ dealStage: { isLostStage: true } });
+      }
+
+      if (orConditions.length > 0) {
+        where.OR = orConditions;
+      }
     }
 
     // Fetch deals with related data
@@ -99,6 +142,9 @@ export async function GET(request: NextRequest) {
         assignedTo: deal.assigned_to || '',
         pipelineId: deal.pipeline || 'default',
         archived: false,
+        // Status flags based on stage
+        isWon: deal.dealStage?.isClosedStage || false,
+        isLost: deal.dealStage?.isLostStage || false,
         // Loan-specific fields
         isLoanDeal: deal.isLoanDeal || false,
         lenderId: deal.lenderId,

@@ -49,15 +49,32 @@ export default function DSCRCalculator({ deal, onDealUpdated }: DSCRCalculatorPr
 
   // Calculate DSCR
   const calculatedDSCR = useMemo(() => {
-    const monthlyRent = formData.isOccupied && formData.actualRent 
-      ? parseFloat(formData.actualRent) 
-      : parseFloat(formData.marketRent) || 0;
-    
+    const marketRent = parseFloat(formData.marketRent) || 0;
+    const actualRent = parseFloat(formData.actualRent) || 0;
+
+    // DSCR rent calculation logic:
+    // - If OCCUPIED: use the LOWER of actual rent vs market rent
+    // - If VACANT: use market rent only
+    let monthlyRent = 0;
+    if (formData.isOccupied) {
+      // For occupied properties, use the lower of actual vs market rent
+      if (actualRent > 0 && marketRent > 0) {
+        monthlyRent = Math.min(actualRent, marketRent);
+      } else if (actualRent > 0) {
+        monthlyRent = actualRent;
+      } else {
+        monthlyRent = marketRent;
+      }
+    } else {
+      // For vacant properties, use market rent
+      monthlyRent = marketRent;
+    }
+
     const monthlyInsurance = (parseFloat(formData.annualInsurance) || 0) / 12;
     const monthlyTaxes = (parseFloat(formData.annualTaxes) || 0) / 12;
     const loanAmount = parseFloat(formData.loanAmount) || 0;
     const interestRate = parseFloat(formData.interestRate) || 0;
-    
+
     if (!monthlyRent || !loanAmount || !interestRate) return null;
     
     // Calculate monthly payment (P&I or Interest Only)
@@ -172,7 +189,9 @@ export default function DSCRCalculator({ deal, onDealUpdated }: DSCRCalculatorPr
           <div>
             <Label>Property Occupancy</Label>
             <p className="text-sm text-muted-foreground">
-              {formData.isOccupied ? 'Occupied - Using actual rent' : 'Vacant - Using market rent'}
+              {formData.isOccupied
+                ? 'Occupied - Using lower of actual vs market rent'
+                : 'Vacant - Using market rent'}
             </p>
           </div>
           <Switch
@@ -184,7 +203,16 @@ export default function DSCRCalculator({ deal, onDealUpdated }: DSCRCalculatorPr
         {/* Rental Income */}
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label>Market Rent (Monthly)</Label>
+            <Label className="flex items-center gap-2">
+              Market Rent (Monthly)
+              {!formData.isOccupied && formData.marketRent && (
+                <Badge variant="secondary" className="text-xs bg-green-100 text-green-700">Using</Badge>
+              )}
+              {formData.isOccupied && formData.marketRent && formData.actualRent &&
+                parseFloat(formData.marketRent) <= parseFloat(formData.actualRent) && (
+                <Badge variant="secondary" className="text-xs bg-green-100 text-green-700">Using (lower)</Badge>
+              )}
+            </Label>
             <div className="relative">
               <span className="absolute left-3 top-2.5 text-muted-foreground">$</span>
               <Input
@@ -196,7 +224,16 @@ export default function DSCRCalculator({ deal, onDealUpdated }: DSCRCalculatorPr
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Actual Rent (Monthly)</Label>
+            <Label className="flex items-center gap-2">
+              Actual Rent (Monthly)
+              {formData.isOccupied && formData.actualRent && formData.marketRent &&
+                parseFloat(formData.actualRent) < parseFloat(formData.marketRent) && (
+                <Badge variant="secondary" className="text-xs bg-green-100 text-green-700">Using (lower)</Badge>
+              )}
+              {formData.isOccupied && formData.actualRent && !formData.marketRent && (
+                <Badge variant="secondary" className="text-xs bg-green-100 text-green-700">Using</Badge>
+              )}
+            </Label>
             <div className="relative">
               <span className="absolute left-3 top-2.5 text-muted-foreground">$</span>
               <Input
@@ -209,6 +246,13 @@ export default function DSCRCalculator({ deal, onDealUpdated }: DSCRCalculatorPr
             </div>
           </div>
         </div>
+
+        {/* Rent calculation hint */}
+        {formData.isOccupied && formData.marketRent && formData.actualRent && (
+          <p className="text-xs text-muted-foreground bg-blue-50 dark:bg-blue-950 p-2 rounded">
+            💡 For occupied properties, DSCR uses the lower rent: ${Math.min(parseFloat(formData.marketRent), parseFloat(formData.actualRent)).toLocaleString()}/mo
+          </p>
+        )}
 
         {/* Insurance & Taxes */}
         <div className="grid grid-cols-2 gap-4">

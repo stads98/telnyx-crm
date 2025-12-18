@@ -190,63 +190,87 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
         console.log('[MultiCall] Adding AMD call:', callControlId)
         setActiveCalls(prev => new Map(prev).set(callControlId, newCall))
 
-        // Poll for AMD result
+        // Poll for AMD result with proper cancellation
+        let pollCancelled = false
+        let transferListenerCleanup: (() => void) | null = null
+
         const pollAMD = async () => {
           const maxPolls = 30 // 30 seconds max
           for (let i = 0; i < maxPolls; i++) {
+            // Check if call was manually ended (e.g., user hung up)
+            const currentCall = activeCallsRef.current.get(callControlId)
+            if (!currentCall || currentCall.status === 'ended' || currentCall.status === 'failed') {
+              console.log('[MultiCall] AMD polling stopped - call already ended:', callControlId)
+              pollCancelled = true
+              return
+            }
+
             await new Promise(r => setTimeout(r, 1000))
+            if (pollCancelled) return
 
-            const statusRes = await fetch(`/api/power-dialer/amd-status?callControlId=${callControlId}`)
-            if (!statusRes.ok) continue
+            try {
+              const statusRes = await fetch(`/api/power-dialer/amd-status?callControlId=${callControlId}`)
+              if (!statusRes.ok) continue
 
-            const statusData = await statusRes.json()
-            console.log('[MultiCall] AMD status:', statusData.status)
+              const statusData = await statusRes.json()
+              console.log('[MultiCall] AMD status:', statusData.status)
 
-            if (statusData.status === 'human_detected') {
-              // Human detected - the call will be transferred to WebRTC
-              // Listen for incoming WebRTC call to get the call reference
-              console.log('[MultiCall] Human detected, waiting for WebRTC transfer...')
+              if (statusData.status === 'human_detected') {
+                // Human detected - the call will be transferred to WebRTC
+                console.log('[MultiCall] Human detected, waiting for WebRTC transfer...')
 
-              const handleTransferredCall = (info: { callId: string; call: any; callerNumber?: string }) => {
-                console.log('[MultiCall] Received transferred call:', info.callId, 'for AMD call:', callControlId)
+                const handleTransferredCall = (info: { callId: string; call: any; callerNumber?: string }) => {
+                  console.log('[MultiCall] Received transferred call:', info.callId, 'for AMD call:', callControlId)
 
-                // Update the call entry with WebRTC call reference
-                setActiveCalls(prev => {
-                  const newMap = new Map(prev)
-                  const existingCall = newMap.get(callControlId)
-                  if (existingCall) {
-                    // Store the WebRTC call reference and session ID
-                    newMap.set(callControlId, {
-                      ...existingCall,
-                      telnyxCall: info.call,
-                      webrtcSessionId: info.callId,
-                    })
-                    console.log('[MultiCall] Updated AMD call with WebRTC reference:', callControlId, '->', info.callId)
-                  }
-                  return newMap
-                })
+                  // Update the call entry with WebRTC call reference
+                  setActiveCalls(prev => {
+                    const newMap = new Map(prev)
+                    const existingCall = newMap.get(callControlId)
+                    if (existingCall) {
+                      newMap.set(callControlId, {
+                        ...existingCall,
+                        telnyxCall: info.call,
+                        webrtcSessionId: info.callId,
+                      })
+                      console.log('[MultiCall] Updated AMD call with WebRTC reference:', callControlId, '->', info.callId)
+                    }
+                    return newMap
+                  })
 
-                // Remove the listener
-                rtcClient.off('inboundCall', handleTransferredCall)
+                  // Cleanup listener
+                  if (transferListenerCleanup) transferListenerCleanup()
+                }
+
+                // Listen for the incoming WebRTC call (from transfer)
+                rtcClient.on('inboundCall', handleTransferredCall)
+
+                // Store cleanup function
+                transferListenerCleanup = () => {
+                  rtcClient.off('inboundCall', handleTransferredCall)
+                  transferListenerCleanup = null
+                }
+
+                // Timeout to remove listener after 10 seconds if no transfer
+                const transferTimeout = setTimeout(() => {
+                  if (transferListenerCleanup) transferListenerCleanup()
+                }, 10000)
+
+                handleCallAnswered(callControlId)
+                return
+              } else if (['machine_detected', 'voicemail', 'no_answer', 'failed', 'hangup', 'ended'].includes(statusData.status)) {
+                handleCallEnded(callControlId)
+                return
               }
-
-              // Listen for the incoming WebRTC call (from transfer)
-              rtcClient.on('inboundCall', handleTransferredCall)
-
-              // Timeout to remove listener after 10 seconds if no transfer
-              setTimeout(() => {
-                rtcClient.off('inboundCall', handleTransferredCall)
-              }, 10000)
-
-              handleCallAnswered(callControlId)
-              return
-            } else if (['machine_detected', 'voicemail', 'no_answer', 'failed', 'hangup'].includes(statusData.status)) {
-              handleCallEnded(callControlId)
-              return
+            } catch (err) {
+              console.error('[MultiCall] AMD poll error:', err)
+              // Continue polling on network errors
             }
           }
           // Timeout - treat as failed
-          handleCallEnded(callControlId)
+          if (!pollCancelled) {
+            console.log('[MultiCall] AMD polling timed out:', callControlId)
+            handleCallEnded(callControlId)
+          }
         }
         pollAMD()
 
@@ -483,6 +507,20 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
+    // Notify AMD status store that call ended (stops polling for this call)
+    if (call.amdEnabled && call.callControlId) {
+      try {
+        await fetch('/api/power-dialer/amd-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callControlId: call.callControlId, action: 'end' })
+        })
+        console.log('[MultiCall] AMD status marked as ended')
+      } catch (e) {
+        // Non-critical - just for cleanup
+      }
+    }
+
     // Last resort: Try rtcClient.hangup() without a specific session
     if (!hangupSuccessful) {
       try {
@@ -564,8 +602,9 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   // Hang up all calls and dismiss all windows after a delay
+  // NOTE: This is now triggered by the global Cmd/Ctrl+X handler in global-close-context.tsx
   const closeAllCallWindows = useCallback(() => {
-    console.log('[MultiCall] Shift+X: Closing all call windows...')
+    console.log('[MultiCall] Closing all call windows...')
 
     // First, hang up all active calls
     hangUpAllCalls()
@@ -577,26 +616,6 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
       setPrimaryCallId(null)
     }, 1500)
   }, [hangUpAllCalls])
-
-  // Keyboard shortcut: Shift+X to close all call windows
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Shift+X to close all call windows
-      if (e.shiftKey && e.key.toLowerCase() === 'x') {
-        // Don't trigger if user is typing in an input/textarea
-        const target = e.target as HTMLElement
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-          return
-        }
-
-        e.preventDefault()
-        closeAllCallWindows()
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeAllCallWindows])
 
   const value = {
     activeCalls,

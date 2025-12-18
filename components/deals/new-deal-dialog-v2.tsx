@@ -13,26 +13,28 @@ import { Check, ChevronsUpDown, Loader2, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { Pipeline, PipelineStage, Lender } from '@/types/deals';
+import AddContactDialog from '@/components/contacts/add-contact-dialog';
 
 interface ContactProperty {
-  id: string;
-  propertyAddress?: string;
-  city?: string;
-  state?: string;
-  zipCode?: string;
+	id: string;
+	address?: string;
+	city?: string;
+	state?: string;
+	zipCode?: string;
+	llcName?: string | null;
 }
 
 interface Contact {
-  id: string;
-  firstName?: string;
-  lastName?: string;
-  fullName?: string;
-  propertyAddress?: string;
-  city?: string;
-  state?: string;
-  zipCode?: string;
-  llcName?: string;
-  properties?: ContactProperty[];
+	id: string;
+	firstName?: string;
+	lastName?: string;
+	fullName?: string;
+	propertyAddress?: string;
+	city?: string;
+	state?: string;
+	zipCode?: string;
+	llcName?: string | null;
+	properties?: ContactProperty[];
 }
 
 // Helper to format number with commas
@@ -88,9 +90,12 @@ export default function NewDealDialogV2({
   const [saving, setSaving] = useState(false);
   const [contactSearchOpen, setContactSearchOpen] = useState(false);
   const [contactSearch, setContactSearch] = useState('');
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [showAddContactDialog, setShowAddContactDialog] = useState(false);
+  const [isAddingNewProperty, setIsAddingNewProperty] = useState(false);
   const [showQuickAddContact, setShowQuickAddContact] = useState(false);
   const [quickContactName, setQuickContactName] = useState('');
-  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [newPropertyAddress, setNewPropertyAddress] = useState('');
   const [formData, setFormData] = useState({
     title: '',
     value: '',
@@ -317,6 +322,10 @@ export default function NewDealDialogV2({
   const resetForm = () => {
     setSelectedContact(null);
     setContactSearch('');
+    setShowQuickAddContact(false);
+    setQuickContactName('');
+    setIsAddingNewProperty(false);
+    setNewPropertyAddress('');
     setFormData({
       title: '', value: '', valueFormatted: '', contactId: '', stageId: pipeline?.stages?.[0]?.id || '',
       expectedCloseDate: '', notes: '', isLoanDeal: isLoanPipeline, lenderId: '',
@@ -326,8 +335,8 @@ export default function NewDealDialogV2({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" onPointerDownOutside={(e) => e.preventDefault()}>
+    <Dialog open={open} onOpenChange={onOpenChange} modal={false}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create New {isLoanPipeline ? 'Loan' : 'Deal'}</DialogTitle>
           <DialogDescription>
@@ -345,30 +354,29 @@ export default function NewDealDialogV2({
                 placeholder={isLoanPipeline ? "e.g., 123 Main St - DSCR Loan" : "e.g., Property Purchase"}
               />
             </div>
-            <div>
-              <Label>Contact *</Label>
-              <Popover open={contactSearchOpen} onOpenChange={setContactSearchOpen} modal={true}>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="outline"
-                    role="combobox"
-                    aria-expanded={contactSearchOpen}
-                    className="w-full justify-between font-normal"
-                  >
-                    {selectedContact
-                      ? (selectedContact.fullName || `${selectedContact.firstName || ''} ${selectedContact.lastName || ''}`.trim())
-                      : "Search contacts..."}
-                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent
-                  className="w-[350px] p-0"
-                  align="start"
-                  side="bottom"
-                  sideOffset={4}
-                  onOpenAutoFocus={(e) => e.preventDefault()}
-                >
-                  <Command shouldFilter={false}>
+	            <div>
+	              <Label>Contact *</Label>
+	              <Popover open={contactSearchOpen} onOpenChange={setContactSearchOpen}>
+	                <PopoverTrigger asChild>
+	                  <Button
+	                    variant="outline"
+	                    role="combobox"
+	                    aria-expanded={contactSearchOpen}
+	                    className="w-full justify-between font-normal"
+	                  >
+	                    {selectedContact
+	                      ? (selectedContact.fullName || `${selectedContact.firstName || ''} ${selectedContact.lastName || ''}`.trim())
+	                      : "Search contacts..."}
+	                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+	                  </Button>
+	                </PopoverTrigger>
+	                <PopoverContent
+	                  className="w-[350px] p-0 z-[100]"
+	                  align="start"
+	                  side="bottom"
+	                  sideOffset={4}
+	                >
+	                  <Command shouldFilter={false}>
                     <CommandInput
                       placeholder="Search by name, LLC, or address..."
                       value={contactSearch}
@@ -498,48 +506,70 @@ export default function NewDealDialogV2({
           <div className="grid grid-cols-2 gap-4">
             <div>
               <Label>Property Address</Label>
-              {contactProperties.length > 0 ? (
-                <Select
-                  value={formData.propertyAddress}
-                  onValueChange={(val) => {
-                    if (val === '__new__') {
-                      setFormData({ ...formData, propertyAddress: '' });
-                    } else {
-                      setFormData({ ...formData, propertyAddress: val });
-                    }
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select property" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {contactProperties.map((prop) => (
-                      <SelectItem key={prop.id} value={prop.address}>
-                        {prop.address}
+              {contactProperties.length > 0 && !isAddingNewProperty ? (
+                <>
+                  <Select
+                    value={formData.propertyAddress}
+                    onValueChange={(val) => {
+                      if (val === '__new__') {
+                        setIsAddingNewProperty(true);
+                        setNewPropertyAddress('');
+                      } else {
+                        setFormData({ ...formData, propertyAddress: val });
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select property" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {contactProperties.map((prop) => (
+                        <SelectItem key={prop.id} value={prop.address}>
+                          {prop.address}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="__new__">
+                        <div className="flex items-center gap-2 text-blue-600">
+                          <Plus className="h-4 w-4" />
+                          Add new property
+                        </div>
                       </SelectItem>
-                    ))}
-                    <SelectItem value="__new__">
-                      <div className="flex items-center gap-2 text-blue-600">
-                        <Plus className="h-4 w-4" />
-                        Add new property
-                      </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                    </SelectContent>
+                  </Select>
+                </>
               ) : (
-                <Input
-                  value={formData.propertyAddress}
-                  onChange={(e) => setFormData({ ...formData, propertyAddress: e.target.value })}
-                  placeholder="123 Main St, City, State"
-                />
-              )}
-              {formData.propertyAddress === '' && contactProperties.length > 0 && (
-                <Input
-                  className="mt-2"
-                  value={formData.propertyAddress}
-                  onChange={(e) => setFormData({ ...formData, propertyAddress: e.target.value })}
-                  placeholder="Enter new property address..."
-                />
+                <div className="space-y-2">
+                  <Input
+                    value={isAddingNewProperty ? newPropertyAddress : formData.propertyAddress}
+                    onChange={(e) => {
+                      if (isAddingNewProperty) {
+                        setNewPropertyAddress(e.target.value);
+                        setFormData({ ...formData, propertyAddress: e.target.value });
+                      } else {
+                        setFormData({ ...formData, propertyAddress: e.target.value });
+                      }
+                    }}
+                    placeholder="123 Main St, City, State"
+                  />
+                  {isAddingNewProperty && contactProperties.length > 0 && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setIsAddingNewProperty(false);
+                        setNewPropertyAddress('');
+                        // Reset to first property if available
+                        if (contactProperties.length > 0) {
+                          setFormData({ ...formData, propertyAddress: contactProperties[0].address });
+                        }
+                      }}
+                      className="text-xs"
+                    >
+                      ← Back to existing properties
+                    </Button>
+                  )}
+                </div>
               )}
             </div>
             <div>

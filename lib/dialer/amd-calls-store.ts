@@ -5,12 +5,14 @@
  * the webhook handler can access the call metadata when AMD results arrive.
  */
 
-export type AMDStatus = 'initiated' | 'ringing' | 'answered' | 'amd_checking' | 'human_detected' | 'voicemail' | 'no_answer' | 'busy' | 'failed' | 'ended'
+export type AMDStatus = 'initiated' | 'ringing' | 'answered' | 'amd_checking' | 'human_detected' | 'machine_detected' | 'voicemail' | 'no_answer' | 'busy' | 'failed' | 'ended'
 
 export interface PendingAMDCall {
+  type?: string             // 'manual_multi_call' or 'power_dialer'
   sessionId?: string
   queueItemId?: string
-  contactId: string
+  contactId?: string        // Optional - may not have a CRM contact
+  contactName?: string      // Display name for UI
   fromNumber: string
   toNumber: string
   userId: string
@@ -19,7 +21,7 @@ export interface PendingAMDCall {
   listEntryId?: string
   // Status tracking for polling
   status: AMDStatus
-  amdResult?: 'human' | 'machine' | 'fax' | 'unknown'
+  amdResult?: 'human' | 'machine' | 'fax' | 'unknown' | 'uncertain'
   hangupCause?: string
 }
 

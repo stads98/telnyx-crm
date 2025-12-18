@@ -31,10 +31,13 @@ export default function LoanTasks({ dealId, contactId }: LoanTasksProps) {
   const { openTask } = useTaskUI();
 
   useEffect(() => {
-    loadTasks();
+    if (contactId) {
+      loadTasks();
+    }
   }, [dealId, contactId]);
 
   const loadTasks = async () => {
+    if (!contactId) return;
     try {
       setLoading(true);
       const res = await fetch(`/api/tasks?contactId=${contactId}&limit=50`);

@@ -100,7 +100,7 @@ export default function LoanCoPilotPage() {
 
   return (
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
-      <Header onMenuClick={() => setSidebarOpen(!sidebarOpen)} />
+      <Header />
 
       <div className="flex flex-1 overflow-hidden">
         <Sidebar

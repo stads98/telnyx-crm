@@ -45,7 +45,7 @@ export default function LoanCopilotPage() {
   return (
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       {/* Header */}
-      <Header onMenuClick={() => setSidebarOpen(!sidebarOpen)} />
+      <Header />
 
       {/* Body: Sidebar + Main content */}
       <div className="flex flex-1 overflow-hidden">

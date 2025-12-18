@@ -46,6 +46,13 @@ export async function POST(request: NextRequest) {
         }
         break
 
+      case 'call.ringing':
+        if (pendingCall) {
+          pendingCall.status = 'ringing'
+        }
+        console.log(`[Manual AMD Webhook] Call ringing`)
+        break
+
       case 'call.answered':
         if (pendingCall) {
           pendingCall.status = 'answered'

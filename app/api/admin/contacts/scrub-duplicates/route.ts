@@ -12,10 +12,26 @@ function normalizePhoneForMatching(phone: string | null): string {
   return digits.slice(-10) // Get last 10 digits
 }
 
+// Helper: normalize name for matching (trim, lowercase, collapse spaces)
+function normalizeNameForMatching(firstName: string | null, lastName: string | null): string {
+  const full = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim().toLowerCase()
+  return full.replace(/\s+/g, ' ')
+}
+
+// Helper: normalize city+state for matching
+function normalizeCityStateForMatching(city: string | null, state: string | null): string {
+  const c = (city || '').trim().toLowerCase()
+  const s = (state || '').trim().toLowerCase()
+  if (!c || !s) return ''
+  return `${c}|${s}`
+}
+
 interface DuplicateContact {
   id: string
   name: string
   phone: string
+  city?: string
+  state?: string
   propertyAddress: string | null
   propertiesCount: number
   createdAt: Date
@@ -25,6 +41,8 @@ interface DuplicateContact {
 interface DuplicateGroup {
   phone: string
   normalizedPhone: string
+  matchType: 'phone' | 'name_location'
+  matchKey?: string
   contacts: DuplicateContact[]
   uniqueProperties: string[]
   action: 'merge' | 'skip'
@@ -37,7 +55,7 @@ interface ScrubPreview {
   groups: DuplicateGroup[]
 }
 
-// GET: Preview duplicate groups (phone-based matching)
+// GET: Preview duplicate groups (phone-based + name+city+state fallback matching)
 export async function GET(request: NextRequest) {
   return withAdminAuth(request, async () => {
     try {
@@ -45,8 +63,10 @@ export async function GET(request: NextRequest) {
       const limit = parseInt(searchParams.get('limit') || '100')
       const batchSize = parseInt(searchParams.get('batchSize') || '1000')
 
-      // Build phone -> contacts mapping
+      // Build phone -> contacts mapping AND name+location -> contacts mapping
       const phoneMap = new Map<string, any[]>()
+      const nameLocationMap = new Map<string, any[]>()
+      const contactsWithPhone = new Set<string>() // Track contact IDs that have a valid phone
       let page = 0
 
       while (true) {
@@ -59,6 +79,8 @@ export async function GET(request: NextRequest) {
             firstName: true,
             lastName: true,
             phone1: true,
+            city: true,
+            state: true,
             propertyAddress: true,
             createdAt: true,
             _count: { select: { properties: true } }
@@ -68,20 +90,35 @@ export async function GET(request: NextRequest) {
 
         for (const c of contacts) {
           const normalizedPhone = normalizePhoneForMatching(c.phone1)
-          if (!normalizedPhone || normalizedPhone.length < 10) continue
-          
-          const arr = phoneMap.get(normalizedPhone) || []
-          arr.push(c)
-          phoneMap.set(normalizedPhone, arr)
+
+          // Phone-based matching (primary)
+          if (normalizedPhone && normalizedPhone.length >= 10) {
+            contactsWithPhone.add(c.id)
+            const arr = phoneMap.get(normalizedPhone) || []
+            arr.push(c)
+            phoneMap.set(normalizedPhone, arr)
+          } else {
+            // Name+Location fallback for contacts WITHOUT valid phone
+            const normalizedName = normalizeNameForMatching(c.firstName, c.lastName)
+            const normalizedCityState = normalizeCityStateForMatching(c.city, c.state)
+
+            if (normalizedName && normalizedCityState) {
+              const key = `${normalizedName}|${normalizedCityState}`
+              const arr = nameLocationMap.get(key) || []
+              arr.push(c)
+              nameLocationMap.set(key, arr)
+            }
+          }
         }
         page++
       }
 
-      // Build groups for duplicates (>1 contact with same phone)
+      // Build groups for duplicates
       const groups: DuplicateGroup[] = []
       let totalContactsToMerge = 0
       let totalPropertiesToConsolidate = 0
 
+      // Phone-based duplicates (>1 contact with same phone)
       for (const [normalizedPhone, contacts] of phoneMap.entries()) {
         if (contacts.length <= 1) continue
 
@@ -96,6 +133,8 @@ export async function GET(request: NextRequest) {
             id: c.id,
             name: `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown',
             phone: c.phone1 || '',
+            city: c.city || undefined,
+            state: c.state || undefined,
             propertyAddress: c.propertyAddress,
             propertiesCount: c._count?.properties || 0,
             createdAt: c.createdAt,
@@ -106,12 +145,51 @@ export async function GET(request: NextRequest) {
         groups.push({
           phone: contacts[0].phone1 || '',
           normalizedPhone,
+          matchType: 'phone',
           contacts: contactData,
           uniqueProperties: Array.from(uniqueProps),
           action: 'merge'
         })
 
-        totalContactsToMerge += contacts.length - 1 // All except primary
+        totalContactsToMerge += contacts.length - 1
+        totalPropertiesToConsolidate += uniqueProps.size
+      }
+
+      // Name+Location duplicates (fallback for contacts without phone)
+      for (const [nameLocationKey, contacts] of nameLocationMap.entries()) {
+        if (contacts.length <= 1) continue
+
+        // Sort by createdAt (oldest first) - oldest becomes primary
+        contacts.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+
+        // Collect unique property addresses
+        const uniqueProps = new Set<string>()
+        const contactData: DuplicateContact[] = contacts.map((c, idx) => {
+          if (c.propertyAddress) uniqueProps.add(c.propertyAddress.trim().toLowerCase())
+          return {
+            id: c.id,
+            name: `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown',
+            phone: c.phone1 || '',
+            city: c.city || undefined,
+            state: c.state || undefined,
+            propertyAddress: c.propertyAddress,
+            propertiesCount: c._count?.properties || 0,
+            createdAt: c.createdAt,
+            isPrimary: idx === 0
+          }
+        })
+
+        groups.push({
+          phone: '', // No phone for name+location matches
+          normalizedPhone: '',
+          matchType: 'name_location',
+          matchKey: nameLocationKey,
+          contacts: contactData,
+          uniqueProperties: Array.from(uniqueProps),
+          action: 'merge'
+        })
+
+        totalContactsToMerge += contacts.length - 1
         totalPropertiesToConsolidate += uniqueProps.size
       }
 
@@ -134,15 +212,16 @@ export async function GET(request: NextRequest) {
 }
 
 // POST: Execute merge for duplicate groups
-// Body: { groupsToMerge?: string[] } - array of normalizedPhone values, or empty for all
+// Body: { groupsToMerge?: string[] } - array of normalizedPhone or nameLocation keys, or empty for all
 export async function POST(request: NextRequest) {
   return withAdminAuth(request, async () => {
     try {
       const body = await request.json().catch(() => ({}))
       const { groupsToMerge, dryRun = false } = body
 
-      // First, rebuild the phone map to find duplicates
+      // Rebuild both phone and name+location maps to find duplicates
       const phoneMap = new Map<string, any[]>()
+      const nameLocationMap = new Map<string, any[]>()
       const batchSize = 1000
       let page = 0
 
@@ -153,35 +232,48 @@ export async function POST(request: NextRequest) {
           orderBy: { createdAt: 'asc' },
           include: {
             properties: true,
-            tags: { include: { tag: true } }
+            contact_tags: { include: { tag: true } }
           }
         })
         if (contacts.length === 0) break
 
         for (const c of contacts) {
           const normalizedPhone = normalizePhoneForMatching(c.phone1)
-          if (!normalizedPhone || normalizedPhone.length < 10) continue
 
-          const arr = phoneMap.get(normalizedPhone) || []
-          arr.push(c)
-          phoneMap.set(normalizedPhone, arr)
+          if (normalizedPhone && normalizedPhone.length >= 10) {
+            const arr = phoneMap.get(normalizedPhone) || []
+            arr.push(c)
+            phoneMap.set(normalizedPhone, arr)
+          } else {
+            // Name+Location fallback for contacts WITHOUT valid phone
+            const normalizedName = normalizeNameForMatching(c.firstName, c.lastName)
+            const normalizedCityState = normalizeCityStateForMatching(c.city, c.state)
+
+            if (normalizedName && normalizedCityState) {
+              const key = `${normalizedName}|${normalizedCityState}`
+              const arr = nameLocationMap.get(key) || []
+              arr.push(c)
+              nameLocationMap.set(key, arr)
+            }
+          }
         }
         page++
       }
 
-      // Filter to only groups to merge
-      const targetPhones = groupsToMerge && Array.isArray(groupsToMerge) && groupsToMerge.length > 0
+      // Filter to only groups to merge (if specified)
+      const targetKeys = groupsToMerge && Array.isArray(groupsToMerge) && groupsToMerge.length > 0
         ? new Set(groupsToMerge)
         : null
 
       let mergedGroups = 0
       let contactsDeleted = 0
       let propertiesConsolidated = 0
-      const errors: { phone: string; error: string }[] = []
+      const errors: { key: string; error: string }[] = []
 
-      for (const [normalizedPhone, contacts] of phoneMap.entries()) {
-        if (contacts.length <= 1) continue
-        if (targetPhones && !targetPhones.has(normalizedPhone)) continue
+      // Helper function to merge a group of contacts
+      const mergeGroup = async (groupKey: string, contacts: any[]) => {
+        if (contacts.length <= 1) return
+        if (targetKeys && !targetKeys.has(groupKey)) return
 
         // Sort by createdAt - oldest is primary
         contacts.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
@@ -191,7 +283,7 @@ export async function POST(request: NextRequest) {
         if (dryRun) {
           mergedGroups++
           contactsDeleted += duplicates.length
-          continue
+          return
         }
 
         try {
@@ -280,11 +372,11 @@ export async function POST(request: NextRequest) {
               await tx.emailMessage.updateMany({ where: { contactId: dupeId }, data: { contactId: primary.id } })
               await tx.emailConversation.updateMany({ where: { contactId: dupeId }, data: { contactId: primary.id } })
               await tx.contactAssignment.updateMany({ where: { contactId: dupeId }, data: { contactId: primary.id } })
-              await tx.task.updateMany({ where: { contactId: dupeId }, data: { contactId: primary.id } })
+              // Note: Tasks are stored in the Activity model with type='task'
 
               // Copy tags from duplicate (skip if already exists on primary)
-              if (dupe.tags && dupe.tags.length > 0) {
-                for (const ct of dupe.tags) {
+              if (dupe.contact_tags && dupe.contact_tags.length > 0) {
+                for (const ct of dupe.contact_tags) {
                   await tx.contactTag.upsert({
                     where: { contact_id_tag_id: { contact_id: primary.id, tag_id: ct.tag_id } },
                     update: {},
@@ -317,8 +409,18 @@ export async function POST(request: NextRequest) {
           mergedGroups++
           contactsDeleted += duplicates.length
         } catch (err: any) {
-          errors.push({ phone: normalizedPhone, error: err?.message || 'Unknown error' })
+          errors.push({ key: groupKey, error: err?.message || 'Unknown error' })
         }
+      }
+
+      // Process phone-based duplicates
+      for (const [normalizedPhone, contacts] of phoneMap.entries()) {
+        await mergeGroup(normalizedPhone, contacts)
+      }
+
+      // Process name+location-based duplicates
+      for (const [nameLocationKey, contacts] of nameLocationMap.entries()) {
+        await mergeGroup(nameLocationKey, contacts)
       }
 
       return NextResponse.json({

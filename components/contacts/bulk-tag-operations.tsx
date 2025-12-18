@@ -1,12 +1,13 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { TagInput } from "@/components/ui/tag-input"
 import { Badge } from "@/components/ui/badge"
+import { Skeleton } from "@/components/ui/skeleton"
 import { useToast } from "@/hooks/use-toast"
 import { Tags, Plus, Minus, Replace, Layers } from "lucide-react"
 import TagTemplates from "@/components/tags/tag-templates"
@@ -30,7 +31,7 @@ const operationConfig = {
     bgColor: 'bg-green-50'
   },
   remove: {
-    label: 'Remove Tags', 
+    label: 'Remove Tags',
     description: 'Remove selected tags from all selected contacts',
     icon: Minus,
     color: 'text-red-600',
@@ -45,6 +46,11 @@ const operationConfig = {
   }
 }
 
+// Cache for preloaded tags to avoid repeated API calls
+let cachedTags: Tag[] | null = null
+let cacheTimestamp = 0
+const CACHE_DURATION = 30000 // 30 seconds
+
 export default function BulkTagOperations({
   open,
   onOpenChange,
@@ -54,8 +60,47 @@ export default function BulkTagOperations({
   const [operation, setOperation] = useState<Operation>('add')
   const [selectedTags, setSelectedTags] = useState<Tag[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [isLoadingTags, setIsLoadingTags] = useState(false)
+  const [availableTags, setAvailableTags] = useState<Tag[]>([])
   const [showTemplates, setShowTemplates] = useState(false)
   const { toast } = useToast()
+  const hasLoadedTags = useRef(false)
+
+  // Preload tags when modal opens
+  const loadTags = useCallback(async () => {
+    // Check cache first
+    const now = Date.now()
+    if (cachedTags && (now - cacheTimestamp) < CACHE_DURATION) {
+      setAvailableTags(cachedTags)
+      return
+    }
+
+    setIsLoadingTags(true)
+    try {
+      const response = await fetch('/api/contacts/tags')
+      if (response.ok) {
+        const tags = await response.json()
+        cachedTags = tags
+        cacheTimestamp = now
+        setAvailableTags(tags)
+      }
+    } catch (error) {
+      console.error('Failed to load tags:', error)
+    } finally {
+      setIsLoadingTags(false)
+    }
+  }, [])
+
+  // Load tags when modal opens
+  useEffect(() => {
+    if (open && !hasLoadedTags.current) {
+      hasLoadedTags.current = true
+      loadTags()
+    }
+    if (!open) {
+      hasLoadedTags.current = false
+    }
+  }, [open, loadTags])
 
   const config = operationConfig[operation]
   const Icon = config.icon
@@ -192,14 +237,48 @@ export default function BulkTagOperations({
               </Button>
             </div>
             <div className="relative">
-              <TagInput
-                value={selectedTags}
-                onChange={setSelectedTags}
-                placeholder={`Select tags to ${operation}...`}
-                showSuggestions={false}
-                allowCreate={true}
-              />
+              {isLoadingTags ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-10 w-full" />
+                  <div className="flex gap-2">
+                    <Skeleton className="h-6 w-16" />
+                    <Skeleton className="h-6 w-20" />
+                    <Skeleton className="h-6 w-14" />
+                  </div>
+                </div>
+              ) : (
+                <TagInput
+                  value={selectedTags}
+                  onChange={setSelectedTags}
+                  placeholder={`Select tags to ${operation}...`}
+                  showSuggestions={false}
+                  allowCreate={true}
+                />
+              )}
             </div>
+
+            {/* Quick tag selection from available tags */}
+            {!isLoadingTags && availableTags.length > 0 && selectedTags.length === 0 && (
+              <div className="space-y-1">
+                <Label className="text-xs text-gray-500">Quick select:</Label>
+                <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                  {availableTags.slice(0, 20).map((tag) => (
+                    <Badge
+                      key={tag.id}
+                      style={{
+                        backgroundColor: tag.color || '#3B82F6',
+                        color: 'white',
+                        cursor: 'pointer'
+                      }}
+                      className="text-xs hover:opacity-80 transition-opacity"
+                      onClick={() => setSelectedTags([...selectedTags, tag])}
+                    >
+                      + {tag.name}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Selected Tags Preview */}

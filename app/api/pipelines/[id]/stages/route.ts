@@ -89,3 +89,60 @@ export async function POST(
   }
 }
 
+// PUT - Reorder stages
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const body = await request.json();
+    const { stageIds } = body; // Array of stage IDs in new order
+
+    if (!Array.isArray(stageIds)) {
+      return NextResponse.json(
+        { error: 'stageIds must be an array' },
+        { status: 400 }
+      );
+    }
+
+    // Update each stage's orderIndex
+    await Promise.all(
+      stageIds.map((stageId: string, index: number) =>
+        prisma.dealPipelineStage.update({
+          where: { id: stageId },
+          data: { orderIndex: index }
+        })
+      )
+    );
+
+    // Fetch updated stages
+    const stages = await prisma.dealPipelineStage.findMany({
+      where: { pipelineId: id },
+      orderBy: { orderIndex: 'asc' }
+    });
+
+    return NextResponse.json({
+      success: true,
+      stages: stages.map(s => ({
+        id: s.id,
+        key: s.key,
+        name: s.label,
+        label: s.label,
+        order: s.orderIndex,
+        orderIndex: s.orderIndex,
+        color: s.color,
+        defaultProbability: s.defaultProbability,
+        isClosedStage: s.isClosedStage,
+        isLostStage: s.isLostStage,
+      }))
+    });
+  } catch (error) {
+    console.error('Error reordering stages:', error);
+    return NextResponse.json(
+      { error: 'Failed to reorder stages' },
+      { status: 500 }
+    );
+  }
+}
+

@@ -94,17 +94,58 @@ async function handleCallInitiated(data: any) {
   try {
     if (!prisma.telnyxCall) return;
 
-    console.log('[TELNYX WEBHOOK][CALL] -> initiated', { callControlId: data.call_control_id, sessionId: data.call_session_id })
+    const from = data.from || data.sip_from || 'unknown';
+    const to = data.to || data.sip_to || 'unknown';
+    const direction = data.call_direction || 'outbound';
 
-    // Check if call record exists
-    const existingCall = await prisma.telnyxCall.findFirst({
+    console.log('[TELNYX WEBHOOK][CALL] -> initiated', { callControlId: data.call_control_id, sessionId: data.call_session_id, from, to })
+
+    // Check if call record exists by call_control_id, session_id, OR recent matching call
+    // This prevents duplicates when frontend creates a record before webhook arrives
+    let existingCall = await prisma.telnyxCall.findFirst({
       where: {
         OR: [
           { telnyxCallId: data.call_control_id },
-          ...(data.call_session_id ? [{ telnyxSessionId: data.call_session_id }] : [])
+          ...(data.call_session_id ? [{ telnyxSessionId: data.call_session_id }] : []),
+          // Also check for recent calls with matching from/to numbers (within last 10 seconds)
+          // This catches cases where frontend created a record without telnyxCallId yet
+          {
+            AND: [
+              { fromNumber: from },
+              { toNumber: to },
+              { direction: direction },
+              { createdAt: { gte: new Date(Date.now() - 10000) } }, // Within last 10 seconds
+              {
+                OR: [
+                  { telnyxCallId: null },
+                  { status: 'initiated' }
+                ]
+              }
+            ]
+          }
         ]
-      }
+      },
+      orderBy: { createdAt: 'desc' }
     });
+
+    // If no match by IDs, try to find a recent record with same from/to numbers that has no telnyxCallId yet
+    // This handles WebRTC calls where the frontend creates a record before we get the webhook
+    if (!existingCall) {
+      const recentThreshold = new Date(Date.now() - 30000); // 30 seconds ago
+      existingCall = await prisma.telnyxCall.findFirst({
+        where: {
+          fromNumber: from,
+          toNumber: to,
+          telnyxCallId: null, // Only match records without a telnyx call ID
+          status: 'initiated',
+          createdAt: { gte: recentThreshold }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+      if (existingCall) {
+        console.log('[TELNYX WEBHOOK][CALL] -> found orphan record by phone numbers', { id: existingCall.id })
+      }
+    }
 
     if (existingCall) {
       // Update existing record
@@ -121,12 +162,8 @@ async function handleCallInitiated(data: any) {
       });
       console.log('[TELNYX WEBHOOK][CALL] -> updated existing call', { id: existingCall.id })
     } else {
-      // Create new record for WebRTC calls that don't have a record yet
-      console.log('[TELNYX WEBHOOK][CALL] -> creating new call record for WebRTC call')
-
-      const from = data.from || data.sip_from || 'unknown';
-      const to = data.to || data.sip_to || 'unknown';
-      const direction = data.call_direction || 'outbound';
+      // Create new record for calls that don't have a record yet
+      console.log('[TELNYX WEBHOOK][CALL] -> creating new call record')
 
       await prisma.telnyxCall.create({
         data: {
@@ -148,17 +185,55 @@ async function handleCallInitiated(data: any) {
 
 async function handleCallRinging(data: any) {
   try {
-    console.log('[TELNYX WEBHOOK][CALL] -> ringing', { callControlId: data.call_control_id })
+    const from = data.from || data.sip_from || 'unknown';
+    const to = data.to || data.sip_to || 'unknown';
+    const direction = data.call_direction || 'outbound';
 
-    // Check if call record exists
-    const existingCall = await prisma.telnyxCall.findFirst({
+    console.log('[TELNYX WEBHOOK][CALL] -> ringing', { callControlId: data.call_control_id, from, to })
+
+    // Check if call record exists by call_control_id, session_id, OR recent matching call
+    let existingCall = await prisma.telnyxCall.findFirst({
       where: {
         OR: [
           { telnyxCallId: data.call_control_id },
-          ...(data.call_session_id ? [{ telnyxSessionId: data.call_session_id }] : [])
+          ...(data.call_session_id ? [{ telnyxSessionId: data.call_session_id }] : []),
+          // Also check for recent calls with matching from/to numbers (within last 15 seconds)
+          {
+            AND: [
+              { fromNumber: from },
+              { toNumber: to },
+              { direction: direction },
+              { createdAt: { gte: new Date(Date.now() - 15000) } }, // Within last 15 seconds
+              {
+                OR: [
+                  { telnyxCallId: null },
+                  { status: { in: ['initiated', 'ringing'] } }
+                ]
+              }
+            ]
+          }
         ]
-      }
+      },
+      orderBy: { createdAt: 'desc' }
     });
+
+    // If no match by IDs, try to find a recent record with same from/to numbers that has no telnyxCallId yet
+    if (!existingCall) {
+      const recentThreshold = new Date(Date.now() - 30000); // 30 seconds ago
+      existingCall = await prisma.telnyxCall.findFirst({
+        where: {
+          fromNumber: from,
+          toNumber: to,
+          telnyxCallId: null,
+          status: { in: ['initiated', 'ringing'] },
+          createdAt: { gte: recentThreshold }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+      if (existingCall) {
+        console.log('[TELNYX WEBHOOK][CALL] -> found orphan record by phone numbers at ringing', { id: existingCall.id })
+      }
+    }
 
     if (existingCall) {
       const updateRinging: any = {
@@ -173,11 +248,8 @@ async function handleCallRinging(data: any) {
         data: updateRinging,
       });
     } else {
-      // Create new record if it doesn't exist (fallback for WebRTC)
+      // Create new record if it doesn't exist (fallback)
       console.log('[TELNYX WEBHOOK][CALL] -> creating new call record at ringing stage')
-      const from = data.from || data.sip_from || 'unknown';
-      const to = data.to || data.sip_to || 'unknown';
-      const direction = data.call_direction || 'outbound';
 
       await prisma.telnyxCall.create({
         data: {
@@ -333,6 +405,27 @@ async function handleClickToCallLegAAnswered(legACallControlId: string, clientSt
       fromNumber: clientState.fromTelnyxNumber
     })
 
+    // Play audio feedback to let user know we're connecting
+    // Use speak command to tell the user we're dialing
+    try {
+      await fetch(`https://api.telnyx.com/v2/calls/${legACallControlId}/actions/speak`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${TELNYX_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          payload: 'Connecting your call. Please hold.',
+          voice: 'female',
+          language: 'en-US'
+        }),
+      })
+      console.log('[CLICK-TO-CALL-VIA-CELL][SPEAK] Audio feedback sent to Leg A')
+    } catch (speakError) {
+      console.error('[CLICK-TO-CALL-VIA-CELL][SPEAK-ERROR]', speakError)
+      // Continue even if speak fails
+    }
+
     // Create Leg B: Telnyx -> Prospect
     const legBResponse = await fetch('https://api.telnyx.com/v2/calls', {
       method: 'POST',
@@ -391,6 +484,28 @@ async function handleClickToCallLegAAnswered(legACallControlId: string, clientSt
       }
     })
 
+    // Play ringback tone to Leg A so user hears ringing while waiting for prospect
+    // Use Telnyx's built-in ringback generator
+    try {
+      await fetch(`https://api.telnyx.com/v2/calls/${legACallControlId}/actions/playback_start`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${TELNYX_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          // Use a public US ringback tone audio file
+          audio_url: 'https://www.soundjay.com/phone/sounds/telephone-ring-04.mp3',
+          loop: 'infinity',
+          overlay: false
+        }),
+      })
+      console.log('[CLICK-TO-CALL-VIA-CELL][RINGBACK] Playing ringback tone to Leg A')
+    } catch (ringbackError) {
+      console.error('[CLICK-TO-CALL-VIA-CELL][RINGBACK-ERROR]', ringbackError)
+      // Continue even if ringback fails
+    }
+
     // Create TelnyxCall record for this call (Leg B is the actual call to prospect)
     await prisma.telnyxCall.create({
       data: {
@@ -443,6 +558,21 @@ async function handleClickToCallLegBAnswered(legBCallControlId: string, clientSt
       legACallControlId: clientState.legACallControlId,
       legBCallControlId
     })
+
+    // Stop ringback tone on Leg A before bridging
+    try {
+      await fetch(`https://api.telnyx.com/v2/calls/${clientState.legACallControlId}/actions/playback_stop`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${TELNYX_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      })
+      console.log('[CLICK-TO-CALL-VIA-CELL][PLAYBACK-STOP] Stopped ringback on Leg A')
+    } catch (stopError) {
+      // Ignore errors - ringback may have already ended
+    }
 
     // Bridge Leg A (user's cell) to Leg B (prospect)
     const bridgeResponse = await fetch(`https://api.telnyx.com/v2/calls/${clientState.legACallControlId}/actions/bridge`, {
@@ -585,6 +715,7 @@ async function handleCallHangup(data: any) {
       webhookData: data,
       updatedAt: new Date(),
       ...(data.call_session_id ? { telnyxSessionId: data.call_session_id } : {}),
+      ...(data.call_control_id ? { telnyxCallId: data.call_control_id } : {}),
     }
     // Try to update by call_control_id first
     let updated = await prisma.telnyxCall.updateMany({
@@ -594,10 +725,32 @@ async function handleCallHangup(data: any) {
     // If no match by call_control_id, try by session_id (WebRTC calls)
     if (updated.count === 0 && data.call_session_id) {
       console.log('[TELNYX WEBHOOK][CALL] -> hangup: No match by callControlId, trying sessionId')
-      await prisma.telnyxCall.updateMany({
+      updated = await prisma.telnyxCall.updateMany({
         where: { telnyxSessionId: data.call_session_id },
-        data: { ...updateHangup, telnyxCallId: data.call_control_id },
+        data: updateHangup,
       });
+    }
+    // If still no match, try by phone numbers for orphan records
+    if (updated.count === 0) {
+      const from = data.from || data.sip_from;
+      const to = data.to || data.sip_to;
+      if (from && to) {
+        const recentThreshold = new Date(Date.now() - 120000); // 2 minutes ago
+        console.log('[TELNYX WEBHOOK][CALL] -> hangup: No match by IDs, trying phone numbers', { from, to })
+        updated = await prisma.telnyxCall.updateMany({
+          where: {
+            fromNumber: from,
+            toNumber: to,
+            telnyxCallId: null,
+            status: { in: ['initiated', 'ringing', 'answered'] },
+            createdAt: { gte: recentThreshold }
+          },
+          data: updateHangup,
+        });
+        if (updated.count > 0) {
+          console.log('[TELNYX WEBHOOK][CALL] -> hangup: Updated orphan record by phone numbers')
+        }
+      }
     }
 
     // Enqueue CDR reconciliation (retry will handle delayed CDR availability)

@@ -4,26 +4,32 @@ import { useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { AlertCircle, CheckCircle2, Loader2, Users, Home, Merge } from "lucide-react"
+import { CheckCircle2, Loader2, Users, Home, Merge } from "lucide-react"
 import { toast } from "sonner"
 
 interface DuplicateGroup {
   phone: string
+  normalizedPhone?: string
+  matchType?: 'phone' | 'name_location'
+  matchKey?: string
   contacts: Array<{
     id: string
     name: string
     phone: string
+    city?: string
+    state?: string
     propertyAddress: string | null
-    propertyCount: number
+    propertiesCount: number
     createdAt: string
+    isPrimary?: boolean
   }>
+  uniqueProperties?: string[]
 }
 
 interface ScrubPreview {
-  totalContacts: number
-  duplicateGroups: number
-  contactsToMerge: number
-  propertiesConsolidated: number
+  totalDuplicateGroups: number
+  totalContactsToMerge: number
+  totalPropertiesToConsolidate: number
   groups: DuplicateGroup[]
 }
 
@@ -47,11 +53,11 @@ export default function DuplicateManagement() {
       }
 
       setPreview(data.preview)
-      
-      if (data.preview.duplicateGroups === 0) {
+
+      if (data.preview.totalDuplicateGroups === 0) {
         toast.success('No duplicates found! Your CRM is clean.')
       } else {
-        toast.info(`Found ${data.preview.duplicateGroups} duplicate groups`)
+        toast.info(`Found ${data.preview.totalDuplicateGroups} duplicate groups`)
       }
     } catch (error) {
       console.error('Error scanning duplicates:', error)
@@ -62,7 +68,7 @@ export default function DuplicateManagement() {
   }
 
   const handleMergeDuplicates = async () => {
-    if (!preview || preview.duplicateGroups === 0) return
+    if (!preview || preview.totalDuplicateGroups === 0) return
 
     setMerging(true)
 
@@ -79,11 +85,11 @@ export default function DuplicateManagement() {
       }
 
       setMergeResult({
-        merged: data.result.groupsMerged,
-        properties: data.result.propertiesConsolidated,
+        merged: data.summary.mergedGroups,
+        properties: data.summary.propertiesConsolidated,
       })
       setPreview(null)
-      toast.success(`Successfully merged ${data.result.groupsMerged} duplicate groups!`)
+      toast.success(`Successfully merged ${data.summary.mergedGroups} duplicate groups!`)
     } catch (error) {
       console.error('Error merging duplicates:', error)
       toast.error(error instanceof Error ? error.message : 'Failed to merge duplicates')
@@ -117,7 +123,7 @@ export default function DuplicateManagement() {
                 'Scan for Duplicates'
               )}
             </Button>
-            {preview && preview.duplicateGroups > 0 && (
+            {preview && preview.totalDuplicateGroups > 0 && (
               <Button onClick={handleMergeDuplicates} disabled={merging} variant="destructive">
                 {merging ? (
                   <>
@@ -151,22 +157,18 @@ export default function DuplicateManagement() {
           {preview && (
             <div className="space-y-4">
               {/* Summary Stats */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Card className="p-4">
-                  <p className="text-sm text-muted-foreground">Total Contacts</p>
-                  <p className="text-2xl font-bold">{preview.totalContacts}</p>
-                </Card>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 <Card className="p-4 border-orange-200 bg-orange-50/50">
                   <p className="text-sm text-orange-700">Duplicate Groups</p>
-                  <p className="text-2xl font-bold text-orange-700">{preview.duplicateGroups}</p>
+                  <p className="text-2xl font-bold text-orange-700">{preview.totalDuplicateGroups}</p>
                 </Card>
                 <Card className="p-4 border-red-200 bg-red-50/50">
                   <p className="text-sm text-red-700">Contacts to Merge</p>
-                  <p className="text-2xl font-bold text-red-700">{preview.contactsToMerge}</p>
+                  <p className="text-2xl font-bold text-red-700">{preview.totalContactsToMerge}</p>
                 </Card>
                 <Card className="p-4 border-blue-200 bg-blue-50/50">
                   <p className="text-sm text-blue-700">Properties to Consolidate</p>
-                  <p className="text-2xl font-bold text-blue-700">{preview.propertiesConsolidated}</p>
+                  <p className="text-2xl font-bold text-blue-700">{preview.totalPropertiesToConsolidate}</p>
                 </Card>
               </div>
 
@@ -177,15 +179,26 @@ export default function DuplicateManagement() {
                   <div className="space-y-2 max-h-96 overflow-y-auto">
                     {preview.groups.slice(0, 20).map((group, idx) => (
                       <Card key={idx} className="p-3">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Badge variant="outline">{group.phone}</Badge>
+                        <div className="flex items-center gap-2 mb-2 flex-wrap">
+                          {group.matchType === 'phone' ? (
+                            <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                              📞 {group.phone}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
+                              👤 {group.contacts[0]?.name} • {group.contacts[0]?.city}, {group.contacts[0]?.state}
+                            </Badge>
+                          )}
                           <span className="text-sm text-muted-foreground">
                             {group.contacts.length} contacts
                           </span>
+                          <Badge variant="secondary" className="text-xs">
+                            {group.matchType === 'phone' ? 'Phone Match' : 'Name+Location Match'}
+                          </Badge>
                         </div>
                         <div className="space-y-1 text-sm">
                           {group.contacts.map((contact, cIdx) => (
-                            <div key={contact.id} className="flex items-center gap-2">
+                            <div key={contact.id} className="flex items-center gap-2 flex-wrap">
                               {cIdx === 0 && (
                                 <Badge className="bg-green-100 text-green-800 text-xs">Primary</Badge>
                               )}
@@ -199,9 +212,9 @@ export default function DuplicateManagement() {
                                   {contact.propertyAddress}
                                 </span>
                               )}
-                              {contact.propertyCount > 1 && (
+                              {contact.propertiesCount > 1 && (
                                 <Badge variant="outline" className="text-xs">
-                                  +{contact.propertyCount - 1} properties
+                                  +{contact.propertiesCount - 1} properties
                                 </Badge>
                               )}
                             </div>
@@ -218,12 +231,12 @@ export default function DuplicateManagement() {
                 </div>
               )}
 
-              {preview.duplicateGroups === 0 && (
+              {preview.totalDuplicateGroups === 0 && (
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
                   <CheckCircle2 className="h-5 w-5 text-green-600 mt-0.5" />
                   <div>
                     <p className="font-medium text-green-800">No Duplicates Found</p>
-                    <p className="text-sm text-green-700">Your CRM is clean - no contacts share the same phone number.</p>
+                    <p className="text-sm text-green-700">Your CRM is clean - no contacts share the same phone number or name+location.</p>
                   </div>
                 </div>
               )}
