@@ -24,14 +24,14 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
   // Global cache for instant loading - use stable function references only
   const getCached = useGlobalCache(state => state.getCached);
   const isCacheFresh = useGlobalCache(state => state.isCacheFresh);
-  const setDeals = useGlobalCache(state => state.setDeals);
-  const setPipelines = useGlobalCache(state => state.setPipelines);
-  const addDeal = useGlobalCache(state => state.addDeal);
-  const updateDeal = useGlobalCache(state => state.updateDeal);
+  const cacheSetDeals = useGlobalCache(state => state.setDeals);
+  const cacheSetPipelines = useGlobalCache(state => state.setPipelines);
+  const cacheAddDeal = useGlobalCache(state => state.addDeal);
+  const cacheUpdateDeal = useGlobalCache(state => state.updateDeal);
   const initialLoadDone = useRef(false);
 
-  const [deals, setDealsState] = useState<Deal[]>([]);
-  const [pipelines, setPipelinesState] = useState<Pipeline[]>([]);
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [lenders, setLenders] = useState<Lender[]>([]);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string>(initialPipelineId || '');
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
@@ -54,7 +54,7 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
       // Check cache first for instant load
       const cachedPipelines = getCached<Pipeline[]>('pipelines');
       if (cachedPipelines && cachedPipelines.length > 0) {
-        setPipelinesState(cachedPipelines);
+        setPipelines(cachedPipelines);
         if (!selectedPipelineId) {
           const defaultPipeline = cachedPipelines.find((p: Pipeline) => p.isDefault) || cachedPipelines[0];
           setSelectedPipelineId(defaultPipeline.id);
@@ -78,8 +78,8 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
     if (res.ok) {
       const data = await res.json();
       const pipelinesList = data.pipelines || [];
-      setPipelinesState(pipelinesList);
       setPipelines(pipelinesList);
+      cacheSetPipelines(pipelinesList);
       if (!selectedPipelineId && pipelinesList.length > 0) {
         const defaultPipeline = pipelinesList.find((p: Pipeline) => p.isDefault) || pipelinesList[0];
         setSelectedPipelineId(defaultPipeline.id);
@@ -108,7 +108,7 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
       // Check cache first for instant load (only for default view without filters)
       const cachedDeals = getCached<Deal[]>('deals');
       if (cachedDeals && !showWon && !showLost && !showArchived && !initialLoadDone.current) {
-        setDealsState(cachedDeals);
+        setDeals(cachedDeals);
         setLoading(false);
         initialLoadDone.current = true;
         // Background refresh - inline the fetch logic
@@ -117,8 +117,8 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
           if (res.ok) {
             const data = await res.json();
             const dealsList = data.deals || [];
-            setDealsState(dealsList);
             setDeals(dealsList);
+            cacheSetDeals(dealsList);
           }
         });
         return;
@@ -134,10 +134,10 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
       if (res.ok) {
         const data = await res.json();
         const dealsList = data.deals || [];
-        setDealsState(dealsList);
+        setDeals(dealsList);
         // Only cache default view
         if (!showWon && !showLost && !showArchived) {
-          setDeals(dealsList);
+          cacheSetDeals(dealsList);
         }
       }
     } catch (error) {
@@ -168,8 +168,8 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
 
     // Optimistic update - add the new deal immediately
     if (newDeal) {
-      setDealsState(prev => [newDeal, ...prev]);
-      addDeal(newDeal);
+      setDeals(prev => [newDeal, ...prev]);
+      cacheAddDeal(newDeal);
     }
 
     // Background refresh to ensure consistency
@@ -193,7 +193,7 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
     const previousDeals = [...deals];
 
     // OPTIMISTIC UPDATE - Update UI immediately
-    setDealsState(prevDeals =>
+    setDeals(prevDeals =>
       prevDeals.map(d =>
         d.id === dealId
           ? {
@@ -226,12 +226,12 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
         loadDeals();
       } else {
         // ROLLBACK on error
-        setDealsState(previousDeals);
+        setDeals(previousDeals);
         toast.error('Failed to update deal stage');
       }
     } catch (error) {
       // ROLLBACK on error
-      setDealsState(previousDeals);
+      setDeals(previousDeals);
       toast.error('Failed to update deal stage');
     }
   };

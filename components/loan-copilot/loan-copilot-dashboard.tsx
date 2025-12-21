@@ -5,13 +5,25 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { 
-  ArrowLeft, FileText, FolderOpen, Mail, MessageSquare, 
-  CheckSquare, Users, Send, Bot, Building2, DollarSign, 
-  Percent, Calendar, User, MapPin, Phone, ExternalLink
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  ArrowLeft, FileText, FolderOpen, Mail, MessageSquare,
+  CheckSquare, Users, Send, Bot, Building2, DollarSign,
+  Percent, Calendar, User, MapPin, Phone, ExternalLink, Loader2
 } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
+import { toast } from 'sonner';
 import ContactName from '@/components/contacts/contact-name';
 import LoanDocumentManager from './loan-document-manager';
 import LoanChecklist from './loan-checklist';
@@ -29,6 +41,48 @@ interface LoanCopilotDashboardProps {
 
 export default function LoanCopilotDashboard({ deal, onDealUpdated }: LoanCopilotDashboardProps) {
   const [activeTab, setActiveTab] = useState('overview');
+  const [showSendToAnalyst, setShowSendToAnalyst] = useState(false);
+  const [analystEmail, setAnalystEmail] = useState('');
+  const [analystMessage, setAnalystMessage] = useState('');
+  const [sendingToAnalyst, setSendingToAnalyst] = useState(false);
+
+  const handleSendToAnalyst = async () => {
+    if (!analystEmail.trim()) {
+      toast.error('Please enter an analyst email');
+      return;
+    }
+
+    setSendingToAnalyst(true);
+    try {
+      // Create a task for follow-up and send notification
+      const response = await fetch('/api/activities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'TASK',
+          title: `Follow up with analyst: ${analystEmail}`,
+          description: `Loan package sent to analyst.\n\nLoan Details:\n- Property: ${deal.propertyAddress || 'N/A'}\n- Loan Amount: ${deal.loanAmount || deal.value || 'N/A'}\n- Borrower: ${deal.borrowerName || 'N/A'}\n\nMessage: ${analystMessage || 'No additional message'}`,
+          contactId: deal.contactId,
+          dealId: deal.id,
+          dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Due tomorrow
+        }),
+      });
+
+      if (response.ok) {
+        toast.success(`Loan package prepared for ${analystEmail}. Follow-up task created.`);
+        setShowSendToAnalyst(false);
+        setAnalystEmail('');
+        setAnalystMessage('');
+      } else {
+        throw new Error('Failed to create follow-up task');
+      }
+    } catch (error) {
+      console.error('Error sending to analyst:', error);
+      toast.error('Failed to send to analyst');
+    } finally {
+      setSendingToAnalyst(false);
+    }
+  };
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -86,7 +140,7 @@ export default function LoanCopilotDashboard({ deal, onDealUpdated }: LoanCopilo
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" className="gap-2">
+            <Button variant="outline" className="gap-2" onClick={() => setShowSendToAnalyst(true)}>
               <Send className="h-4 w-4" />
               Send to Analyst
             </Button>
@@ -250,7 +304,7 @@ export default function LoanCopilotDashboard({ deal, onDealUpdated }: LoanCopilo
                       <CheckSquare className="h-4 w-4" />
                       Create Task
                     </Button>
-                    <Button variant="outline" className="w-full justify-start gap-2">
+                    <Button variant="outline" className="w-full justify-start gap-2" onClick={() => setShowSendToAnalyst(true)}>
                       <Send className="h-4 w-4" />
                       Send to Analyst
                     </Button>
@@ -319,6 +373,69 @@ export default function LoanCopilotDashboard({ deal, onDealUpdated }: LoanCopilo
           </div>
         </Tabs>
       </div>
+
+      {/* Send to Analyst Dialog */}
+      <Dialog open={showSendToAnalyst} onOpenChange={setShowSendToAnalyst}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Send className="h-5 w-5" />
+              Send to Analyst
+            </DialogTitle>
+            <DialogDescription>
+              Send this loan package to an analyst for review. A follow-up task will be created automatically.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="analyst-email">Analyst Email</Label>
+              <Input
+                id="analyst-email"
+                type="email"
+                placeholder="analyst@example.com"
+                value={analystEmail}
+                onChange={(e) => setAnalystEmail(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="analyst-message">Additional Message (Optional)</Label>
+              <Textarea
+                id="analyst-message"
+                placeholder="Add any notes or special instructions for the analyst..."
+                value={analystMessage}
+                onChange={(e) => setAnalystMessage(e.target.value)}
+                rows={4}
+              />
+            </div>
+            <div className="bg-muted p-3 rounded-lg text-sm">
+              <p className="font-medium mb-1">Loan Summary:</p>
+              <ul className="text-muted-foreground space-y-1">
+                <li>• Property: {deal.propertyAddress || 'N/A'}</li>
+                <li>• Loan Amount: {deal.loanAmount || deal.value ? formatCurrency(deal.loanAmount || deal.value) : 'N/A'}</li>
+                <li>• Borrower: {deal.borrowerName || 'N/A'}</li>
+              </ul>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowSendToAnalyst(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSendToAnalyst} disabled={sendingToAnalyst}>
+              {sendingToAnalyst ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Sending...
+                </>
+              ) : (
+                <>
+                  <Send className="mr-2 h-4 w-4" />
+                  Send to Analyst
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
