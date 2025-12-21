@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState, useCallback } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, usePathname } from "next/navigation"
 import { MessageSquare, Mail, X, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { formatPhoneNumberForDisplay } from "@/lib/phone-utils"
@@ -9,6 +9,8 @@ import { formatPhoneNumberForDisplay } from "@/lib/phone-utils"
 interface InboundMessageToastProps {
   enabled?: boolean
   pollInterval?: number // ms
+  // Scope polling to specific pages - if not provided, polls on all pages
+  allowedPaths?: string[]
 }
 
 interface Notification {
@@ -67,15 +69,23 @@ function saveLastCheckTime(time: string) {
 
 export default function InboundMessageToast({
   enabled = true,
-  pollInterval = 5000 // Check every 5 seconds
+  pollInterval = 5000, // Check every 5 seconds
+  allowedPaths, // If provided, only poll on these paths
 }: InboundMessageToastProps) {
   const router = useRouter()
+  const pathname = usePathname()
   // Initialize from localStorage to persist across navigation/remounts
   const lastSmsCheckRef = useRef<string>(loadLastCheckTime())
   const lastEmailCheckRef = useRef<string>(loadLastCheckTime())
   const [notifications, setNotifications] = useState<Notification[]>([])
   // Track which notification IDs have been shown - persisted in localStorage
   const shownNotificationIdsRef = useRef<Set<string>>(loadShownIds())
+  // Track visibility state for pausing polling when tab is hidden
+  const isVisibleRef = useRef<boolean>(true)
+  // Exponential backoff state
+  const smsBackoffRef = useRef<number>(1)
+  const emailBackoffRef = useRef<number>(1)
+  const MAX_BACKOFF = 8 // Max 8x the poll interval (40 seconds at 5s base)
 
   const addNotification = useCallback((notification: Notification) => {
     // Skip if we've already shown this notification
@@ -112,15 +122,48 @@ export default function InboundMessageToast({
     dismissNotification(notification.id)
   }, [router, dismissNotification])
 
+  // Visibility change handler - pause polling when tab is hidden
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      isVisibleRef.current = document.visibilityState === 'visible'
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [])
+
   useEffect(() => {
     if (!enabled) return
 
-    // Check for new inbound SMS
+    // Check if we should poll on this path
+    if (allowedPaths && allowedPaths.length > 0) {
+      const shouldPoll = allowedPaths.some(path => pathname?.startsWith(path))
+      if (!shouldPoll) return
+    }
+
+    // Check for new inbound SMS with exponential backoff
     const checkNewSms = async () => {
+      // Skip if tab is hidden
+      if (!isVisibleRef.current) return
+
       try {
         const since = lastSmsCheckRef.current
         const res = await fetch(`/api/telnyx/sms/inbound?since=${encodeURIComponent(since)}&limit=5`)
-        if (!res.ok) return
+
+        // Silently ignore 404 errors (endpoint may not be built yet)
+        if (res.status === 404) {
+          // Increase backoff on 404
+          smsBackoffRef.current = Math.min(smsBackoffRef.current * 2, MAX_BACKOFF)
+          return
+        }
+
+        if (!res.ok) {
+          // Increase backoff on error
+          smsBackoffRef.current = Math.min(smsBackoffRef.current * 2, MAX_BACKOFF)
+          return
+        }
+
+        // Reset backoff on success
+        smsBackoffRef.current = 1
 
         const data = await res.json()
         const messages = data.messages || []
@@ -151,17 +194,36 @@ export default function InboundMessageToast({
             })
           })
         }
-      } catch (error) {
-        console.error("Error checking for new SMS:", error)
+      } catch {
+        // Increase backoff on error
+        smsBackoffRef.current = Math.min(smsBackoffRef.current * 2, MAX_BACKOFF)
       }
     }
 
-    // Check for new inbound emails
+    // Check for new inbound emails with exponential backoff
     const checkNewEmails = async () => {
+      // Skip if tab is hidden
+      if (!isVisibleRef.current) return
+
       try {
         const since = lastEmailCheckRef.current
         const res = await fetch(`/api/email/inbound?since=${encodeURIComponent(since)}&limit=5`)
-        if (!res.ok) return
+
+        // Silently ignore 404 errors (endpoint may not be built yet)
+        if (res.status === 404) {
+          // Increase backoff on 404
+          emailBackoffRef.current = Math.min(emailBackoffRef.current * 2, MAX_BACKOFF)
+          return
+        }
+
+        if (!res.ok) {
+          // Increase backoff on error
+          emailBackoffRef.current = Math.min(emailBackoffRef.current * 2, MAX_BACKOFF)
+          return
+        }
+
+        // Reset backoff on success
+        emailBackoffRef.current = 1
 
         const data = await res.json()
         const emails = data.emails || []
@@ -188,22 +250,44 @@ export default function InboundMessageToast({
             })
           })
         }
-      } catch (error) {
-        console.error("Error checking for new emails:", error)
+      } catch {
+        // Increase backoff on error
+        emailBackoffRef.current = Math.min(emailBackoffRef.current * 2, MAX_BACKOFF)
       }
     }
 
-    // Initial check
-    checkNewSms()
-    checkNewEmails()
+    // Initial check (only if tab is visible)
+    if (isVisibleRef.current) {
+      checkNewSms()
+      checkNewEmails()
+    }
 
-    // Set up polling
-    const smsInterval = setInterval(checkNewSms, pollInterval)
-    const emailInterval = setInterval(checkNewEmails, pollInterval)
+    // Set up polling with dynamic intervals based on backoff
+    let smsTimeoutId: NodeJS.Timeout
+    let emailTimeoutId: NodeJS.Timeout
+
+    const scheduleSmsCheck = () => {
+      const interval = pollInterval * smsBackoffRef.current
+      smsTimeoutId = setTimeout(() => {
+        checkNewSms()
+        scheduleSmsCheck()
+      }, interval)
+    }
+
+    const scheduleEmailCheck = () => {
+      const interval = pollInterval * emailBackoffRef.current
+      emailTimeoutId = setTimeout(() => {
+        checkNewEmails()
+        scheduleEmailCheck()
+      }, interval)
+    }
+
+    scheduleSmsCheck()
+    scheduleEmailCheck()
 
     return () => {
-      clearInterval(smsInterval)
-      clearInterval(emailInterval)
+      clearTimeout(smsTimeoutId)
+      clearTimeout(emailTimeoutId)
     }
   }, [enabled, pollInterval, addNotification])
 

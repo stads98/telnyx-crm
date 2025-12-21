@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { X, Phone, Mail, Building2, Calendar, Tag, MessageSquare, PhoneCall, FileText, CheckSquare, User, Plus, Loader2, Trash2, Edit2, Cloud, CloudOff, GripHorizontal, Minimize2, Maximize2, Pin, PinOff } from "lucide-react"
+import { X, Phone, Mail, Building2, Calendar, Tag, MessageSquare, PhoneCall, FileText, CheckSquare, User, Plus, Loader2, Trash2, Edit2, Cloud, CloudOff, GripHorizontal, Minimize2, Maximize2, Pin, PinOff, Copy, ExternalLink, Home, DollarSign, Ruler, BedDouble, Bath, MapPin, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -36,6 +36,7 @@ import {
 import { normalizePropertyType } from "@/lib/property-type-mapper"
 import { CallButtonWithCellHover } from "@/components/ui/call-button-with-cell-hover"
 import { AddressAutocomplete, type AddressComponents } from "@/components/ui/address-autocomplete"
+import { RichTextEditor, type RichTextEditorRef } from "@/components/ui/rich-text-editor"
 
 interface ContactSidePanelProps {
   contact: Contact | null
@@ -181,6 +182,15 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
   const dragStartPos = useRef({ x: 0, y: 0 })
   const panelRef = useRef<HTMLDivElement>(null)
 
+  // Resizing state - use default height, then update on mount
+  const [panelSize, setPanelSize] = useState({ width: 900, height: 700 })
+  const [isResizing, setIsResizing] = useState<string | null>(null) // 'right', 'bottom', 'corner'
+  const resizeStartPos = useRef({ x: 0, y: 0 })
+  const resizeStartSize = useRef({ width: 900, height: 700 })
+
+  // Rich text editor ref
+  const richTextEditorRef = useRef<RichTextEditorRef>(null)
+
   const { openSms } = useSmsUI()
   const { openEmail } = useEmailUI()
   const { makeCall } = useMakeCall()
@@ -217,23 +227,67 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
     setIsDragging(false)
   }, [])
 
-  // Attach/detach global mouse handlers
+  // Resize handlers
+  const handleResizeStart = (e: React.MouseEvent, direction: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsResizing(direction)
+    resizeStartPos.current = { x: e.clientX, y: e.clientY }
+    resizeStartSize.current = { ...panelSize }
+  }
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return
+    const deltaX = e.clientX - resizeStartPos.current.x
+    const deltaY = e.clientY - resizeStartPos.current.y
+
+    let newWidth = resizeStartSize.current.width
+    let newHeight = resizeStartSize.current.height
+
+    if (isResizing === 'right' || isResizing === 'corner') {
+      newWidth = Math.max(600, Math.min(1400, resizeStartSize.current.width + deltaX))
+    }
+    if (isResizing === 'bottom' || isResizing === 'corner') {
+      newHeight = Math.max(300, Math.min(window.innerHeight - 50, resizeStartSize.current.height + deltaY))
+    }
+    if (isResizing === 'left') {
+      newWidth = Math.max(600, Math.min(1400, resizeStartSize.current.width - deltaX))
+    }
+    if (isResizing === 'top') {
+      newHeight = Math.max(300, Math.min(window.innerHeight - 50, resizeStartSize.current.height - deltaY))
+    }
+
+    setPanelSize({ width: newWidth, height: newHeight })
+  }, [isResizing])
+
+  const handleResizeEnd = useCallback(() => {
+    setIsResizing(null)
+  }, [])
+
+  // Attach/detach global mouse handlers for dragging and resizing
   useEffect(() => {
     if (isDragging) {
       window.addEventListener('mousemove', handleDragMove)
       window.addEventListener('mouseup', handleDragEnd)
     }
+    if (isResizing) {
+      window.addEventListener('mousemove', handleResizeMove)
+      window.addEventListener('mouseup', handleResizeEnd)
+    }
     return () => {
       window.removeEventListener('mousemove', handleDragMove)
       window.removeEventListener('mouseup', handleDragEnd)
+      window.removeEventListener('mousemove', handleResizeMove)
+      window.removeEventListener('mouseup', handleResizeEnd)
     }
-  }, [isDragging, handleDragMove, handleDragEnd])
+  }, [isDragging, isResizing, handleDragMove, handleDragEnd, handleResizeMove, handleResizeEnd])
 
   // Reset position when opening
   useEffect(() => {
-    if (open) {
+    if (open && typeof window !== 'undefined') {
       setPosition({ x: 0, y: 0 })
       setIsMinimized(false)
+      setPanelSize({ width: 900, height: window.innerHeight - 32 })
     }
   }, [open, contact?.id])
 
@@ -943,6 +997,85 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
     }
   }
 
+  // Track pending deletes for undo functionality
+  const pendingDeleteRef = useRef<{ id: string; timeoutId: NodeJS.Timeout } | null>(null)
+  const [hiddenNoteIds, setHiddenNoteIds] = useState<Set<string>>(new Set())
+
+  const handleDeleteNote = async (activityId: string) => {
+    // Clear any previous pending delete
+    if (pendingDeleteRef.current) {
+      clearTimeout(pendingDeleteRef.current.timeoutId)
+    }
+
+    // Hide the note immediately from UI
+    setHiddenNoteIds(prev => new Set(prev).add(activityId))
+
+    // Show toast with undo option
+    const timeoutId = setTimeout(async () => {
+      // Actually delete after delay if not undone
+      try {
+        const res = await fetch(`/api/activities/${activityId}`, {
+          method: 'DELETE',
+        })
+        if (res.ok) {
+          loadActivities()
+        } else {
+          // Restore if failed
+          setHiddenNoteIds(prev => {
+            const next = new Set(prev)
+            next.delete(activityId)
+            return next
+          })
+          toast.error('Failed to delete note')
+        }
+      } catch (error) {
+        console.error('Failed to delete note:', error)
+        setHiddenNoteIds(prev => {
+          const next = new Set(prev)
+          next.delete(activityId)
+          return next
+        })
+        toast.error('Failed to delete note')
+      }
+      pendingDeleteRef.current = null
+    }, 5000) // 5 second delay before actual delete
+
+    pendingDeleteRef.current = { id: activityId, timeoutId }
+
+    toast('Note deleted', {
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          if (pendingDeleteRef.current?.id === activityId) {
+            clearTimeout(pendingDeleteRef.current.timeoutId)
+            pendingDeleteRef.current = null
+            // Restore the note in UI
+            setHiddenNoteIds(prev => {
+              const next = new Set(prev)
+              next.delete(activityId)
+              return next
+            })
+            toast.success('Note restored')
+          }
+        }
+      },
+      duration: 5000,
+    })
+  }
+
+  // Helper to copy address to clipboard
+  const copyFullAddress = (prop: Property) => {
+    const fullAddress = [prop.address, prop.city, prop.state, prop.zipCode].filter(Boolean).join(', ')
+    navigator.clipboard.writeText(fullAddress)
+    toast.success('Address copied!')
+  }
+
+  // Helper to open Google search for address
+  const searchAddressOnGoogle = (prop: Property) => {
+    const fullAddress = [prop.address, prop.city, prop.state, prop.zipCode].filter(Boolean).join(' ')
+    window.open(`https://www.google.com/search?q=${encodeURIComponent(fullAddress)}`, '_blank')
+  }
+
   const loadTasks = async () => {
     if (!contact?.id) return
     setLoadingTasks(true)
@@ -1101,9 +1234,46 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
   return (
     <div
       ref={panelRef}
-      className="fixed h-[calc(100vh-32px)] w-[800px] bg-white shadow-2xl z-50 flex flex-col rounded-lg border overflow-hidden"
-      style={{ ...panelStyle, maxHeight: 'calc(100vh - 32px)', margin: position.x === 0 && position.y === 0 ? '16px' : 0 }}
+      className="fixed bg-white shadow-2xl z-50 flex flex-col rounded-lg border overflow-hidden"
+      style={{
+        ...panelStyle,
+        width: panelSize.width,
+        height: panelSize.height,
+        maxHeight: 'calc(100vh - 32px)',
+        margin: position.x === 0 && position.y === 0 ? '16px' : 0
+      }}
     >
+      {/* Resize handles - wider for easier grabbing */}
+      <div
+        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-blue-400/50 transition-colors group"
+        onMouseDown={(e) => handleResizeStart(e, 'left')}
+      >
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-16 bg-gray-300 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" />
+      </div>
+      <div
+        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-blue-400/50 transition-colors group"
+        onMouseDown={(e) => handleResizeStart(e, 'right')}
+      >
+        <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1 h-16 bg-gray-300 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" />
+      </div>
+      <div
+        className="absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize hover:bg-blue-400/50 transition-colors group"
+        onMouseDown={(e) => handleResizeStart(e, 'bottom')}
+      >
+        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 h-1 w-16 bg-gray-300 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" />
+      </div>
+      <div
+        className="absolute top-0 left-0 right-0 h-2 cursor-ns-resize hover:bg-blue-400/50 transition-colors group z-10"
+        onMouseDown={(e) => handleResizeStart(e, 'top')}
+      >
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 h-1 w-16 bg-gray-300 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" />
+      </div>
+      <div
+        className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize hover:bg-blue-400/30 transition-colors rounded-tl"
+        onMouseDown={(e) => handleResizeStart(e, 'corner')}
+      >
+        <div className="absolute bottom-0.5 right-0.5 w-2.5 h-2.5 border-r-2 border-b-2 border-gray-400 rounded-br-sm" />
+      </div>
       {/* Draggable Header */}
       <div
         className="flex items-center justify-between p-2 border-b bg-gradient-to-r from-primary/5 to-primary/10 cursor-move select-none"
@@ -1160,15 +1330,345 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
         </div>
       </div>
 
-      {/* Content - Two Column Layout */}
+      {/* Content - Two Column Layout - Contact Info on LEFT, Activity/Notes on RIGHT */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Column - Activity History (always visible) */}
-        <div className="w-[340px] border-r bg-gray-50/50 flex flex-col">
-          <div className="p-3 border-b bg-white">
+        {/* Left Column - Contact Details (wider for better readability) */}
+        <ScrollArea className="w-[360px] border-r bg-white flex-shrink-0">
+          <div className="p-4 space-y-4">
+            {/* Quick Action Buttons - Icon only with call via cell hover */}
+            <div className="flex gap-2 justify-center">
+              {phones[0] && (
+                <>
+                  <CallButtonWithCellHover
+                    phoneNumber={phones[0]}
+                    contactId={currentContact?.id}
+                    contactName={`${firstName} ${lastName}`.trim()}
+                    onWebRTCCall={() => handleCall(phones[0])}
+                    className="h-9 w-9 hover:bg-blue-50"
+                    iconClassName="h-5 w-5 text-blue-600"
+                  />
+                  <button
+                    onClick={() => handleText(phones[0])}
+                    className="h-9 w-9 rounded-md hover:bg-green-50 text-green-600 transition-colors flex items-center justify-center"
+                    title="Send SMS"
+                  >
+                    <MessageSquare className="h-5 w-5" />
+                  </button>
+                </>
+              )}
+              {emails[0] && (
+                <button
+                  onClick={() => handleEmail(emails[0])}
+                  className="h-9 w-9 rounded-md hover:bg-purple-50 text-purple-600 transition-colors flex items-center justify-center"
+                  title="Send Email"
+                >
+                  <Mail className="h-5 w-5" />
+                </button>
+              )}
+            </div>
+
+            {/* Contact Information - Phones & Emails */}
+            <Card className="border-blue-100">
+              <CardHeader className="pb-2 pt-3 px-3 bg-blue-50/50">
+                <CardTitle className="text-xs font-semibold text-blue-700 uppercase tracking-wide flex items-center gap-2">
+                  <Phone className="h-3.5 w-3.5" />
+                  Contact Info
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="px-3 pb-3 space-y-2">
+                {/* Phones */}
+                {phones.map((phone, idx) => (
+                  <div key={`phone-${idx}`} className="flex items-center gap-2">
+                    <Input
+                      value={phone}
+                      onChange={(e) => updatePhone(idx, e.target.value)}
+                      placeholder={`Phone ${idx + 1}`}
+                      type="tel"
+                      className="h-7 text-xs flex-1"
+                    />
+                    {phone && (
+                      <div className="flex items-center gap-0.5">
+                        <CallButtonWithCellHover
+                          phoneNumber={phone}
+                          contactId={currentContact?.id}
+                          contactName={`${firstName} ${lastName}`.trim()}
+                          onWebRTCCall={() => handleCall(phone)}
+                          className="h-6 w-6 p-0"
+                        />
+                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-green-50" onClick={() => handleText(phone)} title="Text">
+                          <MessageSquare className="h-3 w-3 text-green-600" />
+                        </Button>
+                      </div>
+                    )}
+                    {phones.length > 1 && (
+                      <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-red-50" onClick={() => removePhone(idx)}>
+                        <Trash2 className="h-3 w-3 text-red-500" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                {phones.length < 3 && (
+                  <Button variant="ghost" size="sm" className="h-5 text-[10px] text-blue-600 p-0" onClick={addPhone}>
+                    <Plus className="h-2.5 w-2.5 mr-0.5" /> Add Phone
+                  </Button>
+                )}
+                <div className="border-t pt-2 mt-2">
+                  {emails.map((email, idx) => (
+                    <div key={`email-${idx}`} className="flex items-center gap-2 mb-1">
+                      <Input
+                        value={email}
+                        onChange={(e) => updateEmail(idx, e.target.value)}
+                        placeholder={`Email ${idx + 1}`}
+                        type="email"
+                        className="h-7 text-xs flex-1"
+                      />
+                      {email && (
+                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-purple-50" onClick={() => handleEmail(email)} title="Email">
+                          <Mail className="h-3 w-3 text-purple-600" />
+                        </Button>
+                      )}
+                      {emails.length > 1 && (
+                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0 hover:bg-red-50" onClick={() => removeEmail(idx)}>
+                          <Trash2 className="h-3 w-3 text-red-500" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                  {emails.length < 3 && (
+                    <Button variant="ghost" size="sm" className="h-5 text-[10px] text-blue-600 p-0" onClick={addEmail}>
+                      <Plus className="h-2.5 w-2.5 mr-0.5" /> Add Email
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Properties Section - with icons */}
+            <Card className="border-emerald-100">
+              <CardHeader className="pb-2 pt-3 px-3 bg-emerald-50/50">
+                <CardTitle className="text-xs font-semibold text-emerald-700 uppercase tracking-wide flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Home className="h-3.5 w-3.5" />
+                    Properties ({properties.length})
+                  </div>
+                  <Button variant="ghost" size="sm" className="h-5 text-[10px] text-emerald-600 p-0" onClick={addProperty}>
+                    <Plus className="h-2.5 w-2.5 mr-0.5" /> Add
+                  </Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="px-3 pb-3 space-y-2">
+                {properties.map((prop, idx) => (
+                  <div key={idx} className="p-2 rounded-lg border border-gray-200 bg-gray-50/50 space-y-2">
+                    {/* Full address display with copy/search icons */}
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-medium text-gray-700 truncate flex-1">
+                        {prop.address ? `${prop.address}${prop.city ? `, ${prop.city}` : ''}${prop.state ? `, ${prop.state}` : ''} ${prop.zipCode || ''}` : 'No address'}
+                      </span>
+                      <div className="flex items-center gap-0.5">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 w-5 p-0 hover:bg-blue-50"
+                          onClick={() => copyFullAddress(prop)}
+                          title="Copy address"
+                        >
+                          <Copy className="h-3 w-3 text-blue-500" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 w-5 p-0 hover:bg-green-50"
+                          onClick={() => searchAddressOnGoogle(prop)}
+                          title="Search on Google"
+                        >
+                          <ExternalLink className="h-3 w-3 text-green-500" />
+                        </Button>
+                        {properties.length > 1 && (
+                          <Button variant="ghost" size="sm" className="h-5 w-5 p-0 hover:bg-red-50" onClick={() => removeProperty(idx)}>
+                            <Trash2 className="h-3 w-3 text-red-500" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    {/* Address inputs */}
+                    <AddressAutocomplete
+                      value={prop.address}
+                      onChange={(value) => updateProperty(idx, 'address', value)}
+                      onAddressSelect={(addr: AddressComponents) => {
+                        updateProperty(idx, 'address', addr.address);
+                        updateProperty(idx, 'city', addr.city);
+                        updateProperty(idx, 'state', addr.state);
+                        updateProperty(idx, 'zipCode', addr.zipCode);
+                      }}
+                      placeholder="Street address"
+                      className="h-6 text-xs"
+                    />
+                    <div className="grid grid-cols-3 gap-1">
+                      <Input value={prop.city} onChange={(e) => updateProperty(idx, 'city', e.target.value)} placeholder="City" className="h-6 text-[10px]" />
+                      <Input value={prop.state} onChange={(e) => updateProperty(idx, 'state', e.target.value)} placeholder="State" className="h-6 text-[10px]" />
+                      <Input value={prop.zipCode} onChange={(e) => updateProperty(idx, 'zipCode', e.target.value)} placeholder="Zip" className="h-6 text-[10px]" />
+                    </div>
+                    <Input value={prop.llcName} onChange={(e) => updateProperty(idx, 'llcName', e.target.value)} placeholder="LLC Name" className="h-6 text-xs" />
+                    {/* Property type */}
+                    <Select value={prop.propertyType || ''} onValueChange={(v) => updateProperty(idx, 'propertyType', v)}>
+                      <SelectTrigger className="h-6 text-[10px]"><SelectValue placeholder="Property Type" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Single-family (SFH)">🏠 Single-family</SelectItem>
+                        <SelectItem value="Duplex">🏘️ Duplex</SelectItem>
+                        <SelectItem value="Triplex">🏘️ Triplex</SelectItem>
+                        <SelectItem value="Quadplex">🏘️ Quadplex</SelectItem>
+                        <SelectItem value="Multi-family">🏢 Multi-family (5+)</SelectItem>
+                        <SelectItem value="Townhouse">🏡 Townhouse</SelectItem>
+                        <SelectItem value="Condo">🏙️ Condo</SelectItem>
+                        <SelectItem value="Mobile Home">🏕️ Mobile Home</SelectItem>
+                        <SelectItem value="Land">🌳 Land</SelectItem>
+                        <SelectItem value="Commercial">🏪 Commercial</SelectItem>
+                        <SelectItem value="Other">📍 Other</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {/* Property details with icons */}
+                    <div className="grid grid-cols-3 gap-1">
+                      <div className="flex items-center gap-1">
+                        <BedDouble className="h-3 w-3 text-gray-400" />
+                        <Input type="number" value={prop.bedrooms || ''} onChange={(e) => updateProperty(idx, 'bedrooms', e.target.value ? parseInt(e.target.value) : undefined)} placeholder="Beds" className="h-6 text-[10px] flex-1" />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Bath className="h-3 w-3 text-gray-400" />
+                        <Input type="number" value={prop.totalBathrooms || ''} onChange={(e) => updateProperty(idx, 'totalBathrooms', e.target.value ? parseInt(e.target.value) : undefined)} placeholder="Baths" className="h-6 text-[10px] flex-1" />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Ruler className="h-3 w-3 text-gray-400" />
+                        <Input type="number" value={prop.buildingSqft || ''} onChange={(e) => updateProperty(idx, 'buildingSqft', e.target.value ? parseInt(e.target.value) : undefined)} placeholder="Sqft" className="h-6 text-[10px] flex-1" />
+                      </div>
+                    </div>
+                    {/* Value/Equity with icons */}
+                    <div className="grid grid-cols-2 gap-1">
+                      <div className="flex items-center gap-1">
+                        <DollarSign className="h-3 w-3 text-green-500" />
+                        <Input type="number" value={prop.estValue || ''} onChange={(e) => updateProperty(idx, 'estValue', e.target.value ? parseInt(e.target.value) : undefined)} placeholder="Est. Value" className="h-6 text-[10px] flex-1" />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <DollarSign className="h-3 w-3 text-blue-500" />
+                        <Input type="number" value={prop.estEquity || ''} onChange={(e) => updateProperty(idx, 'estEquity', e.target.value ? parseInt(e.target.value) : undefined)} placeholder="Equity" className="h-6 text-[10px] flex-1" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+
+            {/* Tags - compact */}
+            <Card className="border-purple-100">
+              <CardHeader className="pb-1 pt-2 px-3 bg-purple-50/50">
+                <CardTitle className="text-xs font-semibold text-purple-700 uppercase tracking-wide flex items-center gap-2">
+                  <Tag className="h-3.5 w-3.5" />
+                  Tags
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="px-3 pb-2">
+                <TagInput
+                  value={selectedTags}
+                  onChange={(tags) => saveTagsInstantly(tags)}
+                  contactId={currentContact?.id}
+                  placeholder="Add tags..."
+                  showSuggestions={true}
+                  allowCreate={true}
+                />
+              </CardContent>
+            </Card>
+
+            {/* Sequences */}
+            {currentContact?.id && (
+              <ContactSequences contactId={currentContact.id} />
+            )}
+
+            {/* Deals - only show if there are deals */}
+            {deals.length > 0 && (
+              <Card className="border-indigo-100">
+                <CardHeader className="pb-1 pt-2 px-3 bg-indigo-50/50">
+                  <CardTitle className="text-xs font-semibold text-indigo-700 uppercase tracking-wide flex items-center gap-2">
+                    <FileText className="h-3.5 w-3.5" />
+                    Deals ({deals.length})
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="px-3 pb-2">
+                  <div className="space-y-1">
+                    {deals.map((deal) => (
+                      <Link
+                        key={deal.id}
+                        href={deal.isLoanDeal ? `/loan-copilot/${deal.id}` : `/deals?dealId=${deal.id}`}
+                        className="block p-1.5 rounded border border-gray-200 bg-white hover:bg-indigo-50 hover:border-indigo-300 transition-colors text-xs"
+                      >
+                        <div className="font-medium truncate">{deal.title}</div>
+                        <div className="text-[10px] text-gray-500">{deal.stageLabel || deal.stage}</div>
+                      </Link>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </ScrollArea>
+
+        {/* Right Column - Open Tasks + Activity History & Notes (wider, focus area) */}
+        <div className="flex-1 flex flex-col bg-gradient-to-b from-amber-50/30 to-white">
+          {/* Open Tasks Section - Compact list above Activity & Notes */}
+          <div className={`p-3 border-b ${openTasks.length > 0 ? 'bg-orange-50/50' : 'bg-white'}`}>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className={`text-sm font-semibold flex items-center gap-2 ${openTasks.length > 0 ? 'text-orange-700' : 'text-gray-600'}`}>
+                <CheckSquare className="h-4 w-4" />
+                Open Tasks
+                {openTasks.length > 0 && (
+                  <Badge className="bg-orange-500 text-white text-[10px] px-1.5 py-0">
+                    {openTasks.length}
+                  </Badge>
+                )}
+              </h3>
+              <Button variant="ghost" size="sm" className="h-6 text-xs text-blue-600 hover:text-blue-700 px-2" onClick={handleCreateTask}>
+                <Plus className="h-3 w-3 mr-1" /> Add Task
+              </Button>
+            </div>
+            {loadingTasks ? (
+              <div className="text-center py-2 text-gray-500 text-xs">Loading...</div>
+            ) : openTasks.length === 0 ? (
+              <div className="text-center py-2 text-gray-400 text-xs">No open tasks for this contact</div>
+            ) : (
+              <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+                {openTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    className={`p-2 rounded border text-xs flex items-start gap-2 ${
+                      task.priority === 'high' ? 'border-red-300 bg-red-50' :
+                      task.priority === 'medium' ? 'border-yellow-300 bg-yellow-50' :
+                      'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <Checkbox
+                      checked={false}
+                      onCheckedChange={(checked) => handleTaskComplete(task.id, !!checked)}
+                      className="mt-0.5 h-3.5 w-3.5 flex-shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-gray-900 truncate">{task.subject}</div>
+                      {task.dueDate && (
+                        <div className="flex items-center gap-1 text-[10px] text-gray-500 mt-0.5">
+                          <Calendar className="h-2.5 w-2.5" />
+                          {format(new Date(task.dueDate), 'MMM d, yyyy')}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Activity & Notes Section */}
+          <div className="p-3 border-b bg-white/80">
             <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
-                <Calendar className="h-3.5 w-3.5" />
-                Activity History ({activityHistory.length})
+              <h3 className="text-sm font-semibold text-amber-800 flex items-center gap-2">
+                <Calendar className="h-4 w-4" />
+                Activity & Notes ({activityHistory.length})
               </h3>
               {activityHistory.some(item => item.description && (item.description.length > 50 || item.description.includes('\n'))) && (
                 <Button
@@ -1262,6 +1762,7 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                 <div className="space-y-2">
                   {/* Sort: pinned items first, then by timestamp, then calls before notes */}
                   {[...activityHistory]
+                    .filter((item) => !item.activityId || !hiddenNoteIds.has(item.activityId))
                     .sort((a, b) => {
                       if (a.isPinned && !b.isPinned) return -1
                       if (!a.isPinned && b.isPinned) return 1
@@ -1336,6 +1837,19 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                   title="Edit note"
                                 >
                                   <Edit2 className="h-3 w-3" />
+                                </button>
+                              )}
+                              {/* Delete button for notes - instant with undo */}
+                              {item.activityId && item.metadata?.activityType === 'note' && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleDeleteNote(item.activityId!)
+                                  }}
+                                  className="p-0.5 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
+                                  title="Delete note (Undo available)"
+                                >
+                                  <Trash2 className="h-3 w-3" />
                                 </button>
                               )}
                               <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
@@ -1414,7 +1928,9 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
                                 </div>
                               ) : expandedActivityIds.has(item.id) ? (
                                 <div>
-                                  <p className="text-xs text-gray-600 whitespace-pre-wrap">{renderMarkdownBold(item.description)}</p>
+                                  <div className="max-h-48 overflow-y-auto pr-1">
+                                    <p className="text-xs text-gray-600 whitespace-pre-wrap">{renderMarkdownBold(item.description)}</p>
+                                  </div>
                                   <button
                                     className="text-blue-500 hover:text-blue-700 text-[10px] mt-1"
                                     onClick={(e) => {
@@ -1463,477 +1979,6 @@ export default function ContactSidePanel({ contact, open, onClose }: ContactSide
             </div>
           </ScrollArea>
         </div>
-
-        {/* Right Column - Contact Details */}
-        <ScrollArea className="flex-1">
-          <div className="p-3 space-y-3">
-            {/* Contact Information - Phones & Emails */}
-            <Card>
-              <CardHeader className="pb-2 pt-3 px-3">
-                <CardTitle className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
-                  <Phone className="h-3.5 w-3.5" />
-                  Contact Info
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="px-3 pb-3 space-y-2">
-                {/* Phones */}
-                {phones.map((phone, idx) => (
-                  <div key={`phone-${idx}`} className="flex items-center gap-2">
-                    <Input
-                      value={phone}
-                      onChange={(e) => updatePhone(idx, e.target.value)}
-                      placeholder={`Phone ${idx + 1}`}
-                      type="tel"
-                      className="h-8 text-sm flex-1"
-                    />
-                    {phone && (
-                      <div className="flex items-center gap-0.5">
-                        <CallButtonWithCellHover
-                          phoneNumber={phone}
-                          contactId={currentContact?.id}
-                          contactName={`${currentContact?.firstName || ''} ${currentContact?.lastName || ''}`.trim()}
-                          onWebRTCCall={() => handleCall(phone)}
-                          className="hover:bg-blue-50"
-                        />
-                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 hover:bg-green-50" onClick={() => handleText(phone)} title="Text">
-                          <MessageSquare className="h-3.5 w-3.5 text-green-600" />
-                        </Button>
-                      </div>
-                    )}
-                    {phones.length > 1 && (
-                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0 hover:bg-red-50" onClick={() => removePhone(idx)}>
-                        <Trash2 className="h-3.5 w-3.5 text-red-500" />
-                      </Button>
-                    )}
-                  </div>
-                ))}
-                {phones.length < 3 && (
-                  <Button variant="ghost" size="sm" className="h-6 text-xs text-blue-600 hover:text-blue-700 p-0" onClick={addPhone}>
-                    <Plus className="h-3 w-3 mr-1" /> Add Phone
-                  </Button>
-                )}
-
-                {/* Emails */}
-                <div className="border-t pt-2 mt-2">
-                  {emails.map((email, idx) => (
-                    <div key={`email-${idx}`} className="flex items-center gap-2 mb-2">
-                      <Input
-                        value={email}
-                        onChange={(e) => updateEmail(idx, e.target.value)}
-                        placeholder={`Email ${idx + 1}`}
-                        type="email"
-                        className="h-8 text-sm flex-1"
-                      />
-                      {email && (
-                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 hover:bg-purple-50" onClick={() => handleEmail(email)} title="Send Email">
-                          <Mail className="h-3.5 w-3.5 text-purple-600" />
-                        </Button>
-                      )}
-                      {emails.length > 1 && (
-                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 hover:bg-red-50" onClick={() => removeEmail(idx)}>
-                          <Trash2 className="h-3.5 w-3.5 text-red-500" />
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                  {emails.length < 3 && (
-                    <Button variant="ghost" size="sm" className="h-6 text-xs text-blue-600 hover:text-blue-700 p-0" onClick={addEmail}>
-                      <Plus className="h-3 w-3 mr-1" /> Add Email
-                    </Button>
-                  )}
-                </div>
-
-                {/* Deal Status */}
-                <div className="border-t pt-2 mt-2">
-                  <Label className="text-xs text-gray-500">Deal Status</Label>
-                  <Select value={dealStatus} onValueChange={(v) => { setDealStatus(v); markChanged() }}>
-                    <SelectTrigger className="h-8 text-sm mt-1">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="lead">Lead</SelectItem>
-                      <SelectItem value="credit_run">Credit Run</SelectItem>
-                      <SelectItem value="document_collection">Document Collection</SelectItem>
-                      <SelectItem value="processing">Processing</SelectItem>
-                      <SelectItem value="underwriting">Underwriting</SelectItem>
-                      <SelectItem value="closing">Closing</SelectItem>
-                      <SelectItem value="funded">Funded</SelectItem>
-                      <SelectItem value="lost">Lost</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Properties Section - Numbered */}
-            <Card>
-              <CardHeader className="pb-2 pt-3 px-3">
-                <CardTitle className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Building2 className="h-3.5 w-3.5" />
-                    Properties ({properties.length})
-                  </div>
-                  <Button variant="ghost" size="sm" className="h-6 text-xs text-blue-600 hover:text-blue-700 p-0" onClick={addProperty}>
-                    <Plus className="h-3 w-3 mr-1" /> Add Property
-                  </Button>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="px-3 pb-3 space-y-3">
-                {properties.map((prop, idx) => (
-                  <div key={idx} className="p-2.5 rounded-lg border border-gray-200 bg-gray-50 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-blue-600">Property {idx + 1}</span>
-                      {properties.length > 1 && (
-                        <Button variant="ghost" size="sm" className="h-5 w-5 p-0 hover:bg-red-50" onClick={() => removeProperty(idx)}>
-                          <Trash2 className="h-3 w-3 text-red-500" />
-                        </Button>
-                      )}
-                    </div>
-                    <AddressAutocomplete
-                      value={prop.address}
-                      onChange={(value) => updateProperty(idx, 'address', value)}
-                      onAddressSelect={(addr: AddressComponents) => {
-                        updateProperty(idx, 'address', addr.address);
-                        updateProperty(idx, 'city', addr.city);
-                        updateProperty(idx, 'state', addr.state);
-                        updateProperty(idx, 'zipCode', addr.zipCode);
-                      }}
-                      placeholder="Address"
-                      className="h-7 text-sm"
-                    />
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <Input
-                        value={prop.city}
-                        onChange={(e) => updateProperty(idx, 'city', e.target.value)}
-                        placeholder="City"
-                        className="h-7 text-xs"
-                      />
-                      <Input
-                        value={prop.state}
-                        onChange={(e) => updateProperty(idx, 'state', e.target.value)}
-                        placeholder="State"
-                        className="h-7 text-xs"
-                      />
-                      <Input
-                        value={prop.zipCode}
-                        onChange={(e) => updateProperty(idx, 'zipCode', e.target.value)}
-                        placeholder="Zip"
-                        className="h-7 text-xs"
-                      />
-                    </div>
-                    <Input
-                      value={prop.llcName}
-                      onChange={(e) => updateProperty(idx, 'llcName', e.target.value)}
-                      placeholder="LLC Name (optional)"
-                      className="h-7 text-sm"
-                    />
-                    {/* Property Type - using normalized standard values */}
-                    <Select
-                      value={prop.propertyType || ''}
-                      onValueChange={(v) => updateProperty(idx, 'propertyType', v)}
-                    >
-                      <SelectTrigger className="h-7 text-xs">
-                        <SelectValue placeholder="Property Type">
-                          {prop.propertyType || "Property Type"}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="Single-family (SFH)">Single-family (SFH)</SelectItem>
-                        <SelectItem value="Duplex">Duplex</SelectItem>
-                        <SelectItem value="Triplex">Triplex</SelectItem>
-                        <SelectItem value="Quadplex">Quadplex</SelectItem>
-                        <SelectItem value="Multi-family">Multi-family (5+)</SelectItem>
-                        <SelectItem value="Townhouse">Townhouse</SelectItem>
-                        <SelectItem value="Condo">Condo</SelectItem>
-                        <SelectItem value="Mobile Home">Mobile Home</SelectItem>
-                        <SelectItem value="Land">Land</SelectItem>
-                        <SelectItem value="Commercial">Commercial</SelectItem>
-                        <SelectItem value="Other">Other</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    {/* Beds, Baths, Sqft */}
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Beds</Label>
-                        <Input
-                          type="number"
-                          value={prop.bedrooms || ''}
-                          onChange={(e) => updateProperty(idx, 'bedrooms', e.target.value ? parseInt(e.target.value) : undefined)}
-                          placeholder="—"
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Baths</Label>
-                        <Input
-                          type="number"
-                          value={prop.totalBathrooms || ''}
-                          onChange={(e) => updateProperty(idx, 'totalBathrooms', e.target.value ? parseInt(e.target.value) : undefined)}
-                          placeholder="—"
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Sqft</Label>
-                        <Input
-                          type="number"
-                          value={prop.buildingSqft || ''}
-                          onChange={(e) => updateProperty(idx, 'buildingSqft', e.target.value ? parseInt(e.target.value) : undefined)}
-                          placeholder="—"
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                    </div>
-                    {/* Value & Equity */}
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Est. Value</Label>
-                        <Input
-                          type="number"
-                          value={prop.estValue || ''}
-                          onChange={(e) => updateProperty(idx, 'estValue', e.target.value ? parseInt(e.target.value) : undefined)}
-                          placeholder="$"
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Est. Equity</Label>
-                        <Input
-                          type="number"
-                          value={prop.estEquity || ''}
-                          onChange={(e) => updateProperty(idx, 'estEquity', e.target.value ? parseInt(e.target.value) : undefined)}
-                          placeholder="$"
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                    </div>
-                    {/* Last Sale Date & Amount - collapsed/less prominent */}
-                    <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-gray-100">
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Last Sale Date</Label>
-                        <Input
-                          type="date"
-                          value={prop.lastSaleDate ? prop.lastSaleDate.split('T')[0] : ''}
-                          onChange={(e) => updateProperty(idx, 'lastSaleDate', e.target.value || undefined)}
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[10px] text-gray-400">Last Sale Amt</Label>
-                        <Input
-                          type="number"
-                          value={prop.lastSaleAmount || ''}
-                          onChange={(e) => updateProperty(idx, 'lastSaleAmount', e.target.value ? parseInt(e.target.value) : undefined)}
-                          placeholder="$"
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-
-            {/* Tags */}
-            <Card>
-              <CardHeader className="pb-2 pt-3 px-3">
-                <CardTitle className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
-                  <Tag className="h-3.5 w-3.5" />
-                  Tags
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="px-3 pb-3">
-                <TagInput
-                  value={selectedTags}
-                  onChange={(tags) => saveTagsInstantly(tags)}
-                  contactId={currentContact?.id}
-                  placeholder="Add tags..."
-                  showSuggestions={true}
-                  allowCreate={true}
-                />
-              </CardContent>
-            </Card>
-
-            {/* Open Tasks Section */}
-            <Card>
-              <CardHeader className="pb-2 pt-3 px-3">
-                <CardTitle className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckSquare className="h-3.5 w-3.5" />
-                    Open Tasks ({openTasks.length})
-                  </div>
-                  <Button variant="ghost" size="sm" className="h-6 text-xs text-blue-600 hover:text-blue-700 p-0" onClick={handleCreateTask}>
-                    <Plus className="h-3 w-3 mr-1" /> Add Task
-                  </Button>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="px-3 pb-3">
-                {loadingTasks ? (
-                  <div className="text-center py-3 text-gray-500 text-xs">Loading...</div>
-                ) : openTasks.length === 0 ? (
-                  <div className="text-center py-3 text-gray-400 text-xs">No open tasks</div>
-                ) : (
-                  <div className="space-y-1.5">
-                    {openTasks.map((task) => (
-                      <div key={task.id} className="p-2 rounded border border-blue-100 bg-blue-50/50 text-sm">
-                        {editingTaskId === task.id ? (
-                          // Editing mode
-                          <div className="space-y-2">
-                            <Input
-                              value={editingTaskData.subject || ''}
-                              onChange={(e) => setEditingTaskData(prev => ({ ...prev, subject: e.target.value }))}
-                              placeholder="Task subject"
-                              className="h-7 text-sm"
-                            />
-                            <Input
-                              value={editingTaskData.description || ''}
-                              onChange={(e) => setEditingTaskData(prev => ({ ...prev, description: e.target.value }))}
-                              placeholder="Description (optional)"
-                              className="h-7 text-xs"
-                            />
-                            <div className="flex gap-2">
-                              <Input
-                                type="date"
-                                value={editingTaskData.dueDate ? editingTaskData.dueDate.split('T')[0] : ''}
-                                onChange={(e) => setEditingTaskData(prev => ({ ...prev, dueDate: e.target.value }))}
-                                className="h-7 text-xs flex-1"
-                              />
-                              <Select
-                                value={editingTaskData.priority || 'low'}
-                                onValueChange={(v) => setEditingTaskData(prev => ({ ...prev, priority: v }))}
-                              >
-                                <SelectTrigger className="h-7 text-xs w-24">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="low">Low</SelectItem>
-                                  <SelectItem value="medium">Medium</SelectItem>
-                                  <SelectItem value="high">High</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div className="flex gap-1 justify-end">
-                              <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={cancelEditingTask}>
-                                Cancel
-                              </Button>
-                              <Button size="sm" className="h-6 text-xs" onClick={() => saveTaskEdit(task.id)}>
-                                Save
-                              </Button>
-                            </div>
-                          </div>
-                        ) : (
-                          // Display mode
-                          <>
-                            <div className="flex items-start gap-2">
-                              <Checkbox
-                                checked={false}
-                                onCheckedChange={(checked) => handleTaskComplete(task.id, !!checked)}
-                                className="mt-0.5 h-4 w-4"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <div className="font-medium text-gray-900 truncate text-sm">{task.subject}</div>
-                                {task.description && (
-                                  <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{task.description}</p>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <Badge
-                                  variant="outline"
-                                  className={`text-[10px] px-1.5 py-0 ${
-                                    task.priority === 'high' ? 'border-red-400 text-red-600 bg-red-50' :
-                                    task.priority === 'medium' ? 'border-yellow-400 text-yellow-700 bg-yellow-50' :
-                                    'border-gray-300 text-gray-500'
-                                  }`}
-                                >
-                                  {task.priority || 'low'}
-                                </Badge>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-5 w-5 p-0 hover:bg-blue-100"
-                                  onClick={() => startEditingTask(task)}
-                                >
-                                  <Edit2 className="h-3 w-3 text-blue-600" />
-                                </Button>
-                              </div>
-                            </div>
-                            {task.dueDate && (
-                              <div className="flex items-center gap-1 mt-1 text-xs text-gray-500 ml-6">
-                                <Calendar className="h-3 w-3" />
-                                {format(new Date(task.dueDate), 'MMM d, yyyy')}
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Sequences Section */}
-            {currentContact?.id && (
-              <ContactSequences contactId={currentContact.id} />
-            )}
-
-            {/* Deals Section */}
-            <Card>
-              <CardHeader className="pb-2 pt-3 px-3">
-                <CardTitle className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
-                  <FileText className="h-3.5 w-3.5" />
-                  Deals ({deals.length})
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="px-3 pb-3">
-                {loadingDeals ? (
-                  <div className="text-center py-3 text-gray-500 text-xs">Loading...</div>
-                ) : deals.length === 0 ? (
-                  <div className="text-center py-3 text-gray-400 text-xs">No deals yet</div>
-                ) : (
-                  <div className="space-y-1.5">
-                    {deals.map((deal) => (
-                      <Link
-                        key={deal.id}
-                        href={deal.isLoanDeal ? `/loan-copilot/${deal.id}` : `/deals?dealId=${deal.id}`}
-                        className="block p-2 rounded border border-gray-200 bg-white hover:bg-gray-50 hover:border-blue-300 transition-colors"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="font-medium text-gray-900 truncate text-sm">{deal.title}</div>
-                            {deal.propertyAddress && (
-                              <p className="text-xs text-gray-500 mt-0.5 truncate">{deal.propertyAddress}</p>
-                            )}
-                            {deal.lenderName && (
-                              <p className="text-xs text-gray-400 mt-0.5">Lender: {deal.lenderName}</p>
-                            )}
-                          </div>
-                          <div className="flex flex-col items-end gap-1">
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] px-1.5 py-0"
-                              style={{
-                                backgroundColor: deal.stageColor ? `${deal.stageColor}20` : undefined,
-                                borderColor: deal.stageColor || undefined,
-                                color: deal.stageColor || undefined,
-                              }}
-                            >
-                              {deal.stageLabel || deal.stage}
-                            </Badge>
-                            <span className="text-xs font-medium text-green-600">
-                              ${deal.value?.toLocaleString() || 0}
-                            </span>
-                          </div>
-                        </div>
-                      </Link>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-          </div>
-        </ScrollArea>
       </div>
 
       {/* Follow-up Task Dialog */}

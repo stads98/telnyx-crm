@@ -489,6 +489,7 @@ model Deal {
   @@index([stageId])
   @@index([lenderId])
   @@index([isLoanDeal])
+  @@index([pipeline], name: "idx_deals_pipeline") // For filtering deals by pipeline string
   @@map("deals")
 }
 
@@ -1071,10 +1072,67 @@ model TextBlast {
   Pipeline         Pipeline?       @relation(fields: [pipelineId], references: [id])
   pipelineId       String?         @db.Uuid
 
+  // Optional link to TextBlastList
+  textBlastList    TextBlastList?  @relation("TextBlastListExecutions", fields: [textBlastListId], references: [id], onDelete: SetNull)
+  textBlastListId  String?         @map("text_blast_list_id") @db.Uuid
+
   @@index([status])
+  @@index([textBlastListId])
   @@index([createdBy])
   @@index([createdAt(sort: Desc)])
   @@map("text_blasts")
+}
+
+// Text Blast List - stores tag-based contact filters (like Power Dialer Lists)
+model TextBlastList {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String
+  description      String?
+
+  // Tag filters
+  includeTagIds    String[] @default([]) @map("include_tag_ids") // Tags to include (OR logic)
+  excludeTagIds    String[] @default([]) @map("exclude_tag_ids") // Tags to exclude
+
+  // Saved campaign settings (so user can pick up where they left off)
+  savedMessage     String?  @map("saved_message") @db.Text // Last message draft
+  savedPhoneNumbers String[] @default([]) @map("saved_phone_numbers") // Selected sender numbers
+  savedDelaySeconds Int?     @map("saved_delay_seconds") // Delay between messages
+  savedTemplateId  String?  @map("saved_template_id") @db.Uuid // Last used template
+
+  // Multi-round message templates (stored as JSON array of {content: string})
+  savedTemplates   Json?    @map("saved_templates") // Array of message templates
+
+  // Queue state persistence
+  removedContactIds String[] @default([]) @map("removed_contact_ids") // Contacts removed from queue
+  queueState       Json?    @map("queue_state") // Full queue with statuses per contact/round
+
+  // Auto-sync settings
+  autoSync         Boolean  @default(false) @map("auto_sync")
+  lastSyncAt       DateTime? @map("last_sync_at")
+
+  // Status and counts
+  status           String   @default("draft") // draft, active, paused, completed
+  totalContacts    Int      @default(0) @map("total_contacts")
+  sentCount        Int      @default(0) @map("sent_count")
+
+  // Timestamps
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  lastUsedAt       DateTime? @map("last_used_at")
+
+  // Relations
+  createdBy        String?  @map("created_by") @db.Uuid
+  createdByUser    User?    @relation("UserTextBlastLists", fields: [createdBy], references: [id], onDelete: SetNull)
+  pipelineId       String?  @map("pipeline_id") @db.Uuid
+  pipeline         Pipeline? @relation("PipelineTextBlastLists", fields: [pipelineId], references: [id])
+
+  // Link to actual TextBlast executions
+  textBlasts       TextBlast[] @relation("TextBlastListExecutions")
+
+  @@index([createdBy])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+  @@map("text_blast_lists")
 }
 
 model MessageTemplate {
@@ -1804,6 +1862,7 @@ model User {
 
   // Text blast relations
   textBlasts TextBlast[] @relation("UserTextBlasts")
+  textBlastLists TextBlastList[] @relation("UserTextBlastLists")
 
   // Text campaign relations
   textCampaigns TextCampaign[] @relation("UserTextCampaigns")
@@ -2465,6 +2524,7 @@ model Pipeline {
   deals                Deal[]
   tags                 Tag[]
   textBlasts           TextBlast[]
+  textBlastLists       TextBlastList[] @relation("PipelineTextBlastLists")
   textCampaigns        TextCampaign[]
   textAutomations      TextAutomation[]
   filterPresets        FilterPreset[]

@@ -5,6 +5,20 @@ const { Server } = require('socket.io')
 const fs = require('fs')
 const path = require('path')
 
+// Global error handlers to prevent server crashes
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err)
+  // Don't exit in production - try to keep the server running
+  if (process.env.NODE_ENV !== 'production') {
+    process.exit(1)
+  }
+})
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason)
+  // Don't exit - log and continue
+})
+
 const dev = process.env.NODE_ENV !== 'production'
 const hostname = 'localhost'
 const port = parseInt(process.env.PORT || '3000', 10)
@@ -118,6 +132,27 @@ app.prepare().then(() => {
     host: process.env.REDIS_HOST || '127.0.0.1',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD || undefined,
+    retryStrategy: (times) => {
+      // Exponential backoff with max 30 seconds
+      const delay = Math.min(times * 1000, 30000)
+      console.log(`🔄 Redis reconnecting in ${delay}ms (attempt ${times})`)
+      return delay
+    },
+    maxRetriesPerRequest: 3,
+  })
+
+  // Handle Redis connection errors gracefully
+  redisSubscriber.on('error', (err) => {
+    console.error('❌ Redis connection error:', err.message)
+    // Don't crash - Redis will auto-reconnect
+  })
+
+  redisSubscriber.on('connect', () => {
+    console.log('✅ Redis connected')
+  })
+
+  redisSubscriber.on('reconnecting', () => {
+    console.log('🔄 Redis reconnecting...')
   })
 
   redisSubscriber.subscribe('email:sync', (err) => {
@@ -133,12 +168,12 @@ app.prepare().then(() => {
       try {
         const data = JSON.parse(message)
         console.log('📬 Broadcasting email sync update:', data)
-        
+
         // Broadcast to specific account room
         if (data.accountId) {
           io.to(`account:${data.accountId}`).emit('email:synced', data)
         }
-        
+
         // Broadcast to all connected clients
         io.emit('email:new', data)
       } catch (error) {

@@ -81,26 +81,26 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Fetch deals with related data
-    const deals = await prisma.deal.findMany({
-      where,
-      include: {
-        dealStage: true,
-        lender: true,
-      },
-      orderBy: {
-        created_at: 'desc'
-      },
-      take: limit,
-      skip: offset
-    });
-
-    // Get total count
-    const total = await prisma.deal.count({ where });
+    // Fetch deals and count in parallel for better performance
+    const [deals, total] = await Promise.all([
+      prisma.deal.findMany({
+        where,
+        include: {
+          dealStage: true,
+          lender: true,
+        },
+        orderBy: {
+          created_at: 'desc'
+        },
+        take: limit,
+        skip: offset
+      }),
+      prisma.deal.count({ where })
+    ]);
 
     // Fetch contact information for all deals
     const contactIds = [...new Set(deals.map(d => d.contact_id))];
-    const contacts = await prisma.contact.findMany({
+    const contacts = contactIds.length > 0 ? await prisma.contact.findMany({
       where: {
         id: { in: contactIds }
       },
@@ -114,7 +114,7 @@ export async function GET(request: NextRequest) {
         phone1: true,
         email1: true,
       }
-    });
+    }) : [];
 
     const contactMap = new Map(contacts.map(c => [c.id, c]));
 

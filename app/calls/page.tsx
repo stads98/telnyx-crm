@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Phone, ListOrdered } from "lucide-react"
 import CallsCenterModern from "@/components/calls/calls-center-modern"
 import PowerDialerListsManager from "@/components/calls/power-dialer-lists-manager"
+import { DialerErrorBoundary } from "@/components/calls/dialer-error-boundary"
 
 export default function CallsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -43,11 +44,15 @@ export default function CallsPage() {
                 </TabsList>
 
                 <TabsContent value="manual" className="flex-1 overflow-auto mt-0">
-                  <CallsCenterModern />
+                  <DialerErrorBoundary>
+                    <CallsCenterModern />
+                  </DialerErrorBoundary>
                 </TabsContent>
 
                 <TabsContent value="power-dialer" className="flex-1 overflow-auto mt-0">
-                  <PowerDialerListsManager />
+                  <DialerErrorBoundary>
+                    <PowerDialerListsManager />
+                  </DialerErrorBoundary>
                 </TabsContent>
               </Tabs>
             </div>

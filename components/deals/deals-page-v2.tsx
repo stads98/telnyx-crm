@@ -156,8 +156,16 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
     }
   }, [selectedPipelineId, showWon, showLost, showArchived, loadDeals]);
 
-  const handleDealCreated = () => {
+  const handleDealCreated = (newDeal?: any) => {
     setShowNewDealDialog(false);
+
+    // Optimistic update - add the new deal immediately
+    if (newDeal) {
+      setDeals(prev => [newDeal, ...prev]);
+      globalCache.addDeal(newDeal);
+    }
+
+    // Background refresh to ensure consistency
     loadDeals();
     toast.success('Deal created successfully');
   };
@@ -169,6 +177,29 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
   const handleStageChange = async (dealId: string, newStageId: string) => {
     const deal = deals.find(d => d.id === dealId);
     if (!deal) return;
+
+    // Find the new stage info for optimistic update
+    const newStage = selectedPipeline?.stages?.find(s => s.id === newStageId);
+    if (!newStage) return;
+
+    // Store previous state for rollback
+    const previousDeals = [...deals];
+
+    // OPTIMISTIC UPDATE - Update UI immediately
+    setDeals(prevDeals =>
+      prevDeals.map(d =>
+        d.id === dealId
+          ? {
+              ...d,
+              stageId: newStageId,
+              stage: newStage.key,
+              stageLabel: newStage.label || newStage.name,
+              stageColor: newStage.color || '#e5e7eb',
+              probability: newStage.defaultProbability || d.probability,
+            }
+          : d
+      )
+    );
 
     try {
       const res = await fetch(`/api/deals/${dealId}`, {
@@ -184,11 +215,16 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
 
       if (res.ok) {
         toast.success('Deal stage updated');
+        // Background refresh to ensure consistency (don't block UI)
         loadDeals();
       } else {
+        // ROLLBACK on error
+        setDeals(previousDeals);
         toast.error('Failed to update deal stage');
       }
     } catch (error) {
+      // ROLLBACK on error
+      setDeals(previousDeals);
       toast.error('Failed to update deal stage');
     }
   };

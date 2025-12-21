@@ -10,6 +10,9 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const contactId = searchParams.get('contactId');
     const assignedTo = searchParams.get('assignedTo'); // Comma-separated user IDs
+    const status = searchParams.get('status'); // 'open', 'completed', or 'all'
+    const limit = parseInt(searchParams.get('limit') || '500'); // Default 500, max 1000
+    const offset = parseInt(searchParams.get('offset') || '0');
 
     // Build where clause
     const whereClause: any = {
@@ -29,56 +32,66 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Fetch all tasks (activities of type 'task')
+    // Filter by status if provided
+    if (status && status !== 'all') {
+      whereClause.status = status === 'completed' ? 'completed' : { not: 'completed' };
+    }
+
+    // Fetch tasks with pagination
     // No authentication required to match other API routes in this CRM
-    const activities = await prisma.activity.findMany({
-      where: whereClause,
-      include: {
-        contact: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email1: true,
-            phone1: true,
-            propertyAddress: true,
-            city: true,
-            state: true,
-            zipCode: true,
-            propertyType: true,
+    const [activities, total] = await Promise.all([
+      prisma.activity.findMany({
+        where: whereClause,
+        include: {
+          contact: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email1: true,
+              phone1: true,
+              propertyAddress: true,
+              city: true,
+              state: true,
+              zipCode: true,
+              propertyType: true,
+            },
           },
-        },
-        assignedUser: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
+          assignedUser: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
           },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
           },
-        },
-        activity_tags: {
-          include: {
-            tag: {
-              select: {
-                id: true,
-                name: true,
-                color: true,
+          activity_tags: {
+            include: {
+              tag: {
+                select: {
+                  id: true,
+                  name: true,
+                  color: true,
+                },
               },
             },
           },
         },
-      },
-      orderBy: [
-        { due_date: 'asc' },
-        { created_at: 'desc' },
-      ],
-    });
+        orderBy: [
+          { due_date: 'asc' },
+          { created_at: 'desc' },
+        ],
+        take: Math.min(limit, 1000), // Cap at 1000
+        skip: offset,
+      }),
+      prisma.activity.count({ where: whereClause }),
+    ]);
 
     // Transform to match expected format
     const tasks = activities.map((activity) => ({
@@ -116,7 +129,13 @@ export async function GET(request: NextRequest) {
       })),
     }));
 
-    return NextResponse.json({ tasks });
+    return NextResponse.json({
+      tasks,
+      total,
+      limit: Math.min(limit, 1000),
+      offset,
+      hasMore: offset + tasks.length < total,
+    });
   } catch (error) {
     console.error('Error fetching tasks:', error);
     return NextResponse.json(

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -100,6 +100,12 @@ export default function UnifiedCreateTaskModal({
   const [dueTime, setDueTime] = useState('09:00');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>(initialPriority);
 
+  // Ref to track contactId for reliable access during submit (prevents stale closure issues)
+  const contactIdRef = useRef(contactId);
+  useEffect(() => {
+    contactIdRef.current = contactId;
+  }, [contactId]);
+
   // UI state
   const [loading, setLoading] = useState(false);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -134,10 +140,14 @@ export default function UnifiedCreateTaskModal({
       const res = await fetch('/api/contacts?limit=500');
       if (res.ok) {
         const data = await res.json();
-        setContacts(data.contacts || []);
+        const contactList = data.contacts || [];
+        console.log('[TaskModal] Loaded', contactList.length, 'contacts');
+        setContacts(contactList);
+      } else {
+        console.error('[TaskModal] Failed to load contacts, status:', res.status);
       }
     } catch (error) {
-      console.error('Failed to load contacts:', error);
+      console.error('[TaskModal] Failed to load contacts:', error);
     }
   };
 
@@ -162,14 +172,28 @@ export default function UnifiedCreateTaskModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    // Use ref as fallback in case state is stale (closure issue)
+    const effectiveContactId = contactId || contactIdRef.current;
+
+    console.log('[TaskModal] Submit clicked, contactId (state):', contactId, 'contactId (ref):', contactIdRef.current, 'subject:', subject);
+
     // Validation
     if (!subject.trim()) {
       toast.error('Please enter a task subject');
       return;
     }
 
-    if (!contactId) {
+    if (!effectiveContactId) {
       toast.error('Please select a contact');
+      console.error('[TaskModal] Submit failed: no contactId. State:', contactId, 'Ref:', contactIdRef.current);
+      return;
+    }
+
+    // Validate contactId is a valid UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(effectiveContactId)) {
+      toast.error('Invalid contact selected. Please select a contact again.');
+      console.error('[TaskModal] Submit failed: contactId is not a valid UUID:', effectiveContactId);
       return;
     }
 
@@ -181,7 +205,7 @@ export default function UnifiedCreateTaskModal({
         : undefined;
 
       const payload = {
-        contactId,
+        contactId: effectiveContactId,
         taskType,
         subject: subject.trim(),
         description: description.trim(),
@@ -189,6 +213,8 @@ export default function UnifiedCreateTaskModal({
         priority,
         status: 'open',
       };
+
+      console.log('[TaskModal] Submitting payload:', payload);
 
       const response = await fetch('/api/tasks', {
         method: 'POST',
@@ -202,6 +228,7 @@ export default function UnifiedCreateTaskModal({
       }
 
       const newTask = await response.json();
+      console.log('[TaskModal] Task created:', newTask);
       toast.success('Task created successfully');
 
       // Reset form
@@ -218,7 +245,7 @@ export default function UnifiedCreateTaskModal({
       onTaskCreated?.(newTask);
       onOpenChange(false);
     } catch (error) {
-      console.error('Error creating task:', error);
+      console.error('[TaskModal] Error creating task:', error);
       toast.error(error instanceof Error ? error.message : 'Failed to create task');
     } finally {
       setLoading(false);
@@ -277,7 +304,7 @@ export default function UnifiedCreateTaskModal({
             <Label>
               Contact <span className="text-red-500">*</span>
             </Label>
-            <Popover open={contactSearchOpen} onOpenChange={setContactSearchOpen}>
+            <Popover open={contactSearchOpen} onOpenChange={setContactSearchOpen} modal={true}>
               <PopoverTrigger asChild>
                 <Button
                   type="button"
@@ -285,18 +312,13 @@ export default function UnifiedCreateTaskModal({
                   role="combobox"
                   aria-expanded={contactSearchOpen}
                   className="w-full justify-between font-normal"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setContactSearchOpen(!contactSearchOpen);
-                  }}
                 >
-                  {selectedContact ? (
+                  {contactId && selectedContact ? (
                     <span className="flex items-center gap-2">
                       <User className="h-4 w-4 text-muted-foreground" />
                       {getContactDisplayName(selectedContact)}
                     </span>
-                  ) : contactName ? (
+                  ) : contactId && contactName ? (
                     <span className="flex items-center gap-2">
                       <User className="h-4 w-4 text-muted-foreground" />
                       {contactName}
@@ -310,54 +332,54 @@ export default function UnifiedCreateTaskModal({
               <PopoverContent
                 className="w-[400px] p-0"
                 align="start"
+                sideOffset={4}
                 style={{ zIndex: 99999 }}
-                onOpenAutoFocus={(e) => e.preventDefault()}
-                onInteractOutside={(e) => {
-                  // Don't close if clicking inside the dialog
-                  const target = e.target as HTMLElement;
-                  if (target.closest('[role="dialog"]')) {
-                    e.preventDefault();
-                  }
-                }}
               >
-                <Command
-                  filter={(value, search) => {
-                    if (!search) return 1;
-                    const searchLower = search.toLowerCase();
-                    const valueLower = value.toLowerCase();
-                    return valueLower.includes(searchLower) ? 1 : 0;
-                  }}
-                >
-                  <CommandInput placeholder="Search contacts..." />
+                <Command shouldFilter={true}>
+                  <CommandInput
+                    placeholder="Search contacts..."
+                    autoFocus
+                  />
                   <CommandList>
                     <CommandEmpty>No contacts found.</CommandEmpty>
                     <CommandGroup className="max-h-[300px] overflow-auto">
-                      {contacts.map((contact) => {
-                        const displayName = getContactDisplayName(contact);
-                        const searchValue = `${contact.firstName || ''} ${contact.lastName || ''} ${contact.propertyAddress || ''} ${contact.phone1 || ''}`.trim();
+                      {contacts.length === 0 && (
+                        <div className="py-6 text-center text-sm text-muted-foreground">
+                          Loading contacts...
+                        </div>
+                      )}
+                      {contacts.map((c) => {
+                        const displayName = getContactDisplayName(c);
+                        const searchValue = `${displayName} ${c.propertyAddress || ''} ${c.phone1 || ''}`.toLowerCase();
+                        const isSelected = contactId === c.id;
                         return (
                           <CommandItem
-                            key={contact.id}
+                            key={c.id}
                             value={searchValue}
                             onSelect={() => {
-                              setContactId(contact.id);
+                              console.log('[TaskModal] Contact selected:', c.id, displayName);
+                              // Use functional updates to ensure state is committed
+                              setContactId(c.id);
                               setContactName(displayName);
-                              setContactSearchOpen(false);
+                              // Close popover after a microtask to ensure state updates commit
+                              setTimeout(() => {
+                                setContactSearchOpen(false);
+                              }, 0);
                             }}
                           >
                             <Check
                               className={cn(
                                 'mr-2 h-4 w-4',
-                                contactId === contact.id ? 'opacity-100' : 'opacity-0'
+                                isSelected ? 'opacity-100' : 'opacity-0'
                               )}
                             />
                             <div className="flex flex-col">
                               <span className="font-medium">
                                 {displayName}
                               </span>
-                              {contact.propertyAddress && (
+                              {c.propertyAddress && (
                                 <span className="text-xs text-muted-foreground">
-                                  {contact.propertyAddress}
+                                  {c.propertyAddress}
                                 </span>
                               )}
                             </div>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { getServerSession } from 'next-auth/next'
 import { authOptions } from '@/lib/auth'
+import { formatPhoneNumberForTelnyx, last10Digits } from '@/lib/phone-utils'
 
 export const dynamic = 'force-dynamic'
 
@@ -60,7 +61,14 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const phoneNumbers = [contact.phone1, contact.phone2, contact.phone3].filter((p): p is string => Boolean(p))
+    // Normalize phone numbers to E.164 format for consistent matching
+    const rawPhones = [contact.phone1, contact.phone2, contact.phone3].filter((p): p is string => Boolean(p))
+    const phoneNumbers = rawPhones
+      .map(p => formatPhoneNumberForTelnyx(p))
+      .filter((p): p is string => Boolean(p))
+
+    // Also include raw phone numbers for backward compatibility with older records
+    const allPhoneVariants = [...new Set([...phoneNumbers, ...rawPhones])]
 
     // Get calls for this contact from TelnyxCall table
     const calls = await prisma.telnyxCall.findMany({
@@ -72,14 +80,14 @@ export async function GET(request: NextRequest) {
           {
             AND: [
               { direction: 'outbound' },
-              { toNumber: { in: phoneNumbers } }
+              { toNumber: { in: allPhoneVariants } }
             ]
           },
           // Inbound calls from contact's phone numbers
           {
             AND: [
               { direction: 'inbound' },
-              { fromNumber: { in: phoneNumbers } }
+              { fromNumber: { in: allPhoneVariants } }
             ]
           }
         ]
@@ -156,14 +164,58 @@ async function getAllCalls(user: any, search: string | null, limit: number, offs
     const contacts = contactIds.length > 0
       ? await prisma.contact.findMany({
           where: { id: { in: contactIds } },
-          select: { id: true, firstName: true, lastName: true, phone1: true }
+          select: { id: true, firstName: true, lastName: true, phone1: true, phone2: true, phone3: true }
         })
       : []
     const contactMap = new Map(contacts.map(c => [c.id, c]))
 
+    // For calls without contactId, try to find contact by phone number
+    const callsWithoutContact = calls.filter(c => !c.contactId)
+    const phoneNumbersToLookup = callsWithoutContact.flatMap(call => {
+      const phones = [call.fromNumber, call.toNumber].filter(Boolean)
+      // Also include last 10 digits for matching
+      return [...phones, ...phones.map(p => last10Digits(p)).filter(d => d.length === 10)]
+    })
+
+    // Build phone lookup map
+    const phoneContactMap = new Map<string, typeof contacts[0]>()
+    if (phoneNumbersToLookup.length > 0) {
+      const contactsByPhone = await prisma.contact.findMany({
+        where: {
+          OR: [
+            { phone1: { in: phoneNumbersToLookup } },
+            { phone2: { in: phoneNumbersToLookup } },
+            { phone3: { in: phoneNumbersToLookup } },
+          ],
+          deletedAt: null,
+        },
+        select: { id: true, firstName: true, lastName: true, phone1: true, phone2: true, phone3: true },
+        take: 100, // Limit to prevent huge queries
+      })
+
+      // Map each phone number to its contact
+      for (const contact of contactsByPhone) {
+        const phones = [contact.phone1, contact.phone2, contact.phone3].filter(Boolean) as string[]
+        for (const phone of phones) {
+          phoneContactMap.set(phone, contact)
+          phoneContactMap.set(last10Digits(phone), contact)
+        }
+      }
+    }
+
     // Transform calls
     const transformedCalls = calls.map(call => {
-      const contact = call.contactId ? contactMap.get(call.contactId) : null
+      // First try to get contact by contactId
+      let contact = call.contactId ? contactMap.get(call.contactId) : null
+
+      // If no contact found by ID, try to match by phone number
+      if (!contact) {
+        const phoneToMatch = call.direction === 'outbound' ? call.toNumber : call.fromNumber
+        if (phoneToMatch) {
+          contact = phoneContactMap.get(phoneToMatch) || phoneContactMap.get(last10Digits(phoneToMatch)) || null
+        }
+      }
+
       return {
         id: call.id,
         direction: call.direction,
@@ -176,7 +228,7 @@ async function getAllCalls(user: any, search: string | null, limit: number, offs
         fromNumber: call.fromNumber,
         toNumber: call.toNumber,
         recordingUrl: call.recordingUrl,
-        contactId: call.contactId,
+        contactId: call.contactId || contact?.id || null,
         contact: contact ? {
           id: contact.id,
           firstName: contact.firstName,

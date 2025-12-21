@@ -137,8 +137,10 @@ export default function Providers({ children }: ProvidersProps) {
                             <GlobalTaskModal />
                             {/* Global Contact Side Panel */}
                             <GlobalContactPanel />
-                            {/* Inbound message notifications (SMS/Email) */}
-                            <InboundMessageToast />
+                            {/* Inbound message notifications (SMS/Email) - scoped to messaging pages */}
+                            <InboundMessageToast
+                              allowedPaths={['/dashboard', '/text-center', '/email-center', '/messaging']}
+                            />
                           </GlobalCloseProvider>
                         </ContactPanelProvider>
                       </TaskUIProvider>
