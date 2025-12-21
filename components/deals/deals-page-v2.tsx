@@ -213,9 +213,11 @@ export default function DealsPageV2({ initialPipelineId }: DealsPageV2Props) {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...deal,
-          stage_id: newStageId,
+          stageId: newStageId,
+          stage: newStage.key,
           name: deal.title,
+          value: deal.value,
+          probability: newStage.defaultProbability || deal.probability,
           contact_id: deal.contactId,
         })
       });
