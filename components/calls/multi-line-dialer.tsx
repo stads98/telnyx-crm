@@ -7,10 +7,11 @@ import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Progress } from "@/components/ui/progress"
+import { Slider } from "@/components/ui/slider"
 import { useToast } from "@/hooks/use-toast"
 import {
   Phone, PhoneCall, PhoneOff, PhoneMissed, PhoneOutgoing,
-  Play, Pause, Square, Users, Clock, CheckCircle2,
+  Play, Pause, Square, Users, CheckCircle2,
   Loader2, FileText, ChevronRight, RefreshCw
 } from "lucide-react"
 import { useCallUI } from "@/lib/context/call-ui-context"
@@ -124,9 +125,10 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([])
 
   // Dialer configuration
-  // Note: WebRTC client only supports 1 call at a time, so we dial sequentially
-  // but auto-advance through the queue
-  const [maxLines, setMaxLines] = useState(1)
+  // Multi-line dialing: AMD calls can run in parallel (up to 8 lines)
+  // Only one WebRTC call can be active at a time (when human answers)
+  // Other AMD calls are automatically hung up when first human is connected
+  const [maxLines, setMaxLines] = useState(3)
   const [autoAdvance, setAutoAdvance] = useState(true)
 
   // AMD (Answering Machine Detection) mode
@@ -171,6 +173,42 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
   useEffect(() => { activeLegsRef.current = activeLegs }, [activeLegs])
   useEffect(() => { autoAdvanceRef.current = autoAdvance }, [autoAdvance])
   useEffect(() => { amdEnabledRef.current = amdEnabled }, [amdEnabled])
+
+  // === GUARD CHECK HELPERS ===
+  // Validates that a leg has all required fields to prevent rendering errors
+  const isValidLeg = (leg: ActiveLeg | null | undefined): leg is ActiveLeg => {
+    if (!leg) {
+      console.warn('[Guard] Leg is null or undefined')
+      return false
+    }
+    if (!leg.id || typeof leg.id !== 'string') {
+      console.warn('[Guard] Leg missing valid id:', leg)
+      return false
+    }
+    if (!leg.contact) {
+      console.warn('[Guard] Leg missing contact:', leg.id)
+      return false
+    }
+    if (!leg.toNumber) {
+      console.warn('[Guard] Leg missing toNumber:', leg.id)
+      return false
+    }
+    return true
+  }
+
+  // Filter out any malformed legs before rendering
+  const getValidActiveLegs = (): ActiveLeg[] => {
+    return activeLegs.filter(isValidLeg)
+  }
+
+  // Safely get leg by id with logging
+  const findLegById = (legId: string): ActiveLeg | undefined => {
+    const leg = activeLegs.find(l => l.id === legId)
+    if (!leg) {
+      console.warn('[Guard] Could not find leg with id:', legId)
+    }
+    return leg
+  }
 
   // Refs for polling and auto-scroll
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -340,20 +378,42 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
     }
   }
 
-  // Dial next contact in queue (sequential dialing due to WebRTC single-call limitation)
+  // Dial next batch of contacts (multi-line parallel dialing with AMD)
   const dialNextBatch = async (sessionId: string) => {
     const currentRunState = runStateRef.current
     if (currentRunState.status !== 'running' && currentRunState.status !== 'idle') return
 
-    // Only dial if no active calls (WebRTC supports 1 call at a time)
-    if (activeLegsRef.current.length > 0) return
+    // Check if AMD is enabled for multi-line support
+    const currentAmdEnabled = amdEnabledRef.current
+    const currentActiveLegs = activeLegsRef.current
+
+    // If AMD is disabled, only allow 1 call at a time (WebRTC limitation)
+    if (!currentAmdEnabled) {
+      if (currentActiveLegs.length > 0) return
+    }
+
+    // Check if any call is already connected (human detected or answered)
+    // Only one WebRTC call can be active at a time
+    const hasConnectedCall = currentActiveLegs.some(
+      leg => leg.status === 'answered' || leg.status === 'human_detected'
+    )
+    if (hasConnectedCall) return
+
+    // Calculate available slots
+    const maxConcurrent = currentAmdEnabled ? runStateRef.current.maxLines : 1
+    const availableSlots = maxConcurrent - currentActiveLegs.length
+    if (availableSlots <= 0) return
 
     const pendingContacts = queueRef.current.filter(c => c.status === 'queued')
     if (pendingContacts.length === 0) return
 
-    // Dial the next contact
-    const nextContact = pendingContacts[0]
-    await initiateCall(sessionId, nextContact)
+    // Get contacts to dial (up to available slots)
+    const contactsToDial = pendingContacts.slice(0, availableSlots)
+
+    console.log(`[MultiLineDialer] Dialing ${contactsToDial.length} contacts (${currentActiveLegs.length} active, ${availableSlots} slots available, max ${maxConcurrent})`)
+
+    // Dial all contacts in parallel
+    await Promise.all(contactsToDial.map(contact => initiateCall(sessionId, contact)))
   }
 
   // Initiate a single call
@@ -439,10 +499,15 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
     pollAMDResult(leg.id, contact.id, callControlId, sessionId)
   }
 
-  // Poll for AMD result
+  // Poll for AMD result with fast initial polling for <500ms UI updates
   const pollAMDResult = async (legId: string, queueItemId: string, callControlId: string, sessionId: string) => {
     let attempts = 0
-    const maxAttempts = 60 // 30 seconds max (500ms intervals)
+    // Fast polling for first 20 attempts (5 seconds at 250ms), then slower (500ms)
+    // This ensures <500ms UI updates when events arrive
+    const fastPollInterval = 250 // Fast polling for critical initial period
+    const slowPollInterval = 500 // Slower polling after initial period
+    const fastPollAttempts = 20 // Number of fast polls (20 * 250ms = 5s)
+    const maxAttempts = 80 // Total max attempts (5s fast + 30s slow)
 
     const poll = async () => {
       attempts++
@@ -453,7 +518,23 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
 
         const call = await res.json()
 
-        if (call.status === 'VOICEMAIL' || call.amdResult?.includes('machine')) {
+        // Handle dropped by first-answer-wins (backend dropped this call)
+        if (call.status === 'DROPPED_FIRST_ANSWER_WINS') {
+          console.log('[AMD] Call was dropped by first-answer-wins (another call won)')
+
+          setActiveLegs(prev => prev.filter(l => l.id !== legId))
+          updateContactStatus(queueItemId, 'queued') // Returned to queue
+
+          // Auto-advance to fill available slots
+          if (autoAdvanceRef.current && runStateRef.current.status === 'running') {
+            dialNextBatch(sessionId)
+          }
+
+          return // Stop polling
+        }
+
+        // Handle voicemail detection (align status naming: NO_ANSWER_VOICEMAIL from backend)
+        if (call.status === 'VOICEMAIL' || call.status === 'NO_ANSWER_VOICEMAIL' || call.amdResult?.includes('machine')) {
           // Voicemail detected - update UI and move to next
           console.log('[AMD] Voicemail detected, moving to next contact')
 
@@ -468,21 +549,72 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
             stats: { ...prev.stats, totalNoAnswer: prev.stats.totalNoAnswer + 1 }
           }))
 
-          // Remove leg after brief display
+          // Remove leg immediately for <500ms UI updates
+          // Small delay just for visual feedback that voicemail was detected
           setTimeout(() => {
             setActiveLegs(prev => prev.filter(l => l.id !== legId))
-            // Auto-advance to next contact
+            // Auto-advance to dial more contacts (fill available slots)
             if (autoAdvanceRef.current && runStateRef.current.status === 'running') {
               dialNextBatch(sessionId)
             }
-          }, 2000)
+          }, 250) // Fast removal for snappy UI
+
+          return // Stop polling
+        }
+
+        // Handle connected (backend already bridged the agent)
+        if (call.status === 'CONNECTED') {
+          console.log('[AMD] Backend already bridged agent - call is connected!')
+
+          setActiveLegs(prev => prev.map(l =>
+            l.id === legId ? { ...l, status: 'answered' as const, amdResult: 'human', answeredAt: Date.now() } : l
+          ))
+          updateContactStatus(queueItemId, 'answered')
+
+          // Update stats
+          setRunState(prev => ({
+            ...prev,
+            stats: { ...prev.stats, totalAnswered: prev.stats.totalAnswered + 1 }
+          }))
+
+          // Setup call listeners for when the call ends
+          const currentLeg = activeLegsRef.current.find(l => l.id === legId)
+          if (currentLeg) {
+            setupCallListeners({ ...currentLeg, status: 'answered' }, sessionId)
+          }
 
           return // Stop polling
         }
 
         if (call.status === 'HUMAN_DETECTED' || call.amdResult === 'human') {
-          // Human detected - connect via WebRTC
-          console.log('[AMD] Human detected, connecting via WebRTC')
+          // Human detected - implement first-answer-wins
+          console.log('[AMD] Human detected, implementing first-answer-wins')
+
+          // Get all other active AMD legs (not this one)
+          const otherLegs = activeLegsRef.current.filter(l =>
+            l.id !== legId && l.callControlId && l.status !== 'answered'
+          )
+
+          // Hang up all other legs (first-answer-wins)
+          if (otherLegs.length > 0) {
+            console.log(`[AMD] Hanging up ${otherLegs.length} other legs (first-answer-wins)`)
+            await Promise.all(otherLegs.map(async (leg) => {
+              try {
+                // Hang up via API
+                await fetch(`/api/power-dialer/hangup`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ callControlId: leg.callControlId })
+                })
+                // Return contact to queue
+                updateContactStatus(leg.contact.id, 'queued')
+              } catch (err) {
+                console.error('[AMD] Error hanging up leg:', err)
+              }
+            }))
+            // Remove other legs from active
+            setActiveLegs(prev => prev.filter(l => l.id === legId))
+          }
 
           setActiveLegs(prev => prev.map(l =>
             l.id === legId ? { ...l, status: 'human_detected' as const, amdResult: 'human' } : l
@@ -521,26 +653,64 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
         }
 
         // Continue polling if still in progress
+        // Use fast polling (250ms) for first 20 attempts, then slower (500ms)
         if (attempts < maxAttempts && runStateRef.current.status === 'running') {
-          setTimeout(poll, 500)
+          const nextInterval = attempts < fastPollAttempts ? fastPollInterval : slowPollInterval
+          setTimeout(poll, nextInterval)
         }
       } catch (error) {
         console.error('[AMD] Polling error:', error)
         if (attempts < maxAttempts) {
-          setTimeout(poll, 1000)
+          // On error, use slower interval to avoid hammering the server
+          setTimeout(poll, slowPollInterval * 2)
         }
       }
     }
 
+    // Start polling immediately for fastest response
     poll()
   }
 
   // Connect to a call where human was detected
+  // The backend now bridges the agent directly, so we just need to prepare the WebRTC client
+  // to receive the incoming bridged call (or fall back to outbound call if bridge failed)
   const connectToHumanCall = async (leg: ActiveLeg, sessionId: string) => {
     try {
-      // Start WebRTC call to the same number
       const { rtcClient } = await import('@/lib/webrtc/rtc-client')
       await rtcClient.ensureRegistered()
+
+      // Check if the backend already bridged the agent (status would be 'answered' or 'CONNECTED')
+      // Poll once more to get the latest status
+      const response = await fetch(`/api/power-dialer/calls?callControlId=${leg.callControlId}`)
+      if (response.ok) {
+        const data = await response.json()
+        const call = data.calls?.[0]
+
+        if (call?.status === 'CONNECTED') {
+          // Backend already bridged the agent - the WebRTC client should receive the call
+          console.log('[AMD] Backend bridged agent successfully - waiting for incoming call')
+
+          // Update leg to answered status
+          setActiveLegs(prev => prev.map(l =>
+            l.id === leg.id ? { ...l, status: 'answered' as const, answeredAt: Date.now() } : l
+          ))
+          updateContactStatus(leg.contact.id, 'answered')
+
+          // Update stats
+          setRunState(prev => ({
+            ...prev,
+            stats: { ...prev.stats, totalAnswered: prev.stats.totalAnswered + 1 }
+          }))
+
+          // The WebRTC client should auto-answer the bridged call
+          // Setup listeners for when the call ends
+          setupCallListeners({ ...leg, status: 'answered' }, sessionId)
+          return
+        }
+      }
+
+      // Fallback: Bridge failed, make a new WebRTC call (legacy behavior)
+      console.log('[AMD] Bridge not confirmed - falling back to WebRTC outbound call')
       const { sessionId: webrtcSessionId } = await rtcClient.startCall({
         toNumber: leg.toNumber,
         fromNumber: leg.fromNumber
@@ -1043,6 +1213,31 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
   const completedCount = queue.filter(c => ['completed', 'answered', 'no-answer', 'failed', 'busy'].includes(c.status)).length
   const progressPercent = queue.length > 0 ? (completedCount / queue.length) * 100 : 0
 
+  // Check if any call is answered (for queue scroll freeze and UI highlighting)
+  const hasAnsweredCall = activeLegs.some(l => l.status === 'answered' || l.status === 'human_detected')
+
+  // Get leg status display info with consistent icons and colors
+  const getLegStatusInfo = (status: string) => {
+    switch (status) {
+      case 'initiated':
+        return { label: 'Initiating', icon: <Phone className="h-3 w-3" />, color: 'text-gray-600', badge: 'bg-gray-100 text-gray-700 border-gray-300' }
+      case 'ringing':
+        return { label: 'Ringing', icon: <PhoneOutgoing className="h-3 w-3 animate-pulse" />, color: 'text-orange-600', badge: 'bg-orange-100 text-orange-700 border-orange-300' }
+      case 'amd_checking':
+        return { label: 'Checking...', icon: <Loader2 className="h-3 w-3 animate-spin" />, color: 'text-cyan-600', badge: 'bg-cyan-100 text-cyan-700 border-cyan-300' }
+      case 'human_detected':
+        return { label: 'Human - Connecting', icon: <PhoneCall className="h-3 w-3 animate-pulse" />, color: 'text-green-600', badge: 'bg-green-100 text-green-700 border-green-300' }
+      case 'answered':
+        return { label: 'Connected', icon: <PhoneCall className="h-3 w-3" />, color: 'text-green-600', badge: 'bg-green-500 text-white border-green-600' }
+      case 'voicemail':
+        return { label: 'Voicemail', icon: <PhoneOff className="h-3 w-3" />, color: 'text-purple-600', badge: 'bg-purple-100 text-purple-700 border-purple-300' }
+      case 'hangup':
+        return { label: 'Ended', icon: <PhoneOff className="h-3 w-3" />, color: 'text-gray-600', badge: 'bg-gray-100 text-gray-700 border-gray-300' }
+      default:
+        return { label: 'Pending', icon: <Phone className="h-3 w-3" />, color: 'text-gray-600', badge: 'bg-gray-100 text-gray-700 border-gray-300' }
+    }
+  }
+
   return (
     <div className="flex h-full gap-4 p-4 bg-gray-50 dark:bg-gray-900">
       {/* Column 1: Lists & Configuration */}
@@ -1090,6 +1285,30 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
                 disabled={runState.status === 'running'}
               />
             </div>
+
+            {/* Multi-Line Configuration (only when AMD is enabled) */}
+            {amdEnabled && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium">Concurrent Lines</label>
+                  <Badge variant="outline" className="text-xs">{maxLines} lines</Badge>
+                </div>
+                <Slider
+                  value={[maxLines]}
+                  onValueChange={([value]) => setMaxLines(value)}
+                  min={1}
+                  max={8}
+                  step={1}
+                  disabled={runState.status === 'running'}
+                  className="w-full"
+                />
+                <p className="text-xs text-gray-500">
+                  {maxLines === 1
+                    ? 'Single line - dial one contact at a time'
+                    : `Dial up to ${maxLines} contacts simultaneously (first answer wins)`}
+                </p>
+              </div>
+            )}
 
             {/* Auto-Advance Toggle */}
             <div className="flex items-center justify-between">
@@ -1279,118 +1498,151 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium flex items-center gap-2">
                 <PhoneCall className="h-4 w-4" />
-                Current Call
+                {/* Guard: Use validated legs count */}
+                {getValidActiveLegs().length > 1 ? `Active Lines (${getValidActiveLegs().length})` : 'Current Call'}
               </CardTitle>
-              {runState.status === 'running' && activeLegs.length === 0 && (
-                <Badge variant="default" className="bg-blue-600 animate-pulse">
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                  Dialing...
-                </Badge>
-              )}
-              {activeLegs.length > 0 && activeLegs[0].status === 'answered' && (
-                <Badge variant="default" className="bg-green-600">
-                  <PhoneCall className="h-3 w-3 mr-1" />
-                  Connected
-                </Badge>
-              )}
-              {activeLegs.length > 0 && activeLegs[0].status === 'amd_checking' && (
-                <Badge variant="outline" className="border-cyan-500 text-cyan-600 animate-pulse">
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                  Checking...
-                </Badge>
-              )}
-              {activeLegs.length > 0 && activeLegs[0].status === 'human_detected' && (
-                <Badge variant="default" className="bg-green-500 animate-pulse">
-                  <PhoneCall className="h-3 w-3 mr-1" />
-                  Human Detected!
-                </Badge>
-              )}
-              {activeLegs.length > 0 && activeLegs[0].status === 'voicemail' && (
-                <Badge variant="outline" className="border-purple-500 text-purple-600">
-                  <PhoneOff className="h-3 w-3 mr-1" />
-                  Voicemail
-                </Badge>
-              )}
-              {activeLegs.length > 0 && !['answered', 'amd_checking', 'human_detected', 'voicemail'].includes(activeLegs[0].status) && (
-                <Badge variant="outline" className="border-yellow-500 text-yellow-600 animate-pulse">
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                  Ringing
-                </Badge>
-              )}
+              <div className="flex items-center gap-1">
+                {runState.status === 'running' && getValidActiveLegs().length === 0 && (
+                  <Badge variant="default" className="bg-blue-600 animate-pulse">
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Dialing...
+                  </Badge>
+                )}
+                {getValidActiveLegs().some(l => l?.status === 'answered') && (
+                  <Badge variant="default" className="bg-green-600">
+                    <PhoneCall className="h-3 w-3 mr-1" />
+                    Connected
+                  </Badge>
+                )}
+                {getValidActiveLegs().some(l => l?.status === 'amd_checking') && (
+                  <Badge variant="outline" className="border-cyan-500 text-cyan-600 animate-pulse">
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    {getValidActiveLegs().filter(l => l?.status === 'amd_checking').length} Checking
+                  </Badge>
+                )}
+                {getValidActiveLegs().some(l => l?.status === 'human_detected') && (
+                  <Badge variant="default" className="bg-green-500 animate-pulse">
+                    <PhoneCall className="h-3 w-3 mr-1" />
+                    Human!
+                  </Badge>
+                )}
+              </div>
             </div>
           </CardHeader>
-          <CardContent className="flex-1 min-h-0 overflow-hidden flex items-center justify-center">
-            {activeLegs.length > 0 ? (
-              <div
-                className={cn(
-                  "w-full max-w-md p-6 rounded-xl border-2 transition-all",
-                  activeLegs[0].status === 'answered'
-                    ? "border-green-500 bg-green-50 dark:bg-green-900/20 ring-2 ring-green-500/50"
-                    : activeLegs[0].status === 'amd_checking'
-                    ? "border-cyan-500 bg-cyan-50 dark:bg-cyan-900/20 animate-pulse"
-                    : activeLegs[0].status === 'human_detected'
-                    ? "border-green-400 bg-green-50 dark:bg-green-900/20 animate-pulse"
-                    : activeLegs[0].status === 'voicemail'
-                    ? "border-purple-500 bg-purple-50 dark:bg-purple-900/20"
-                    : "border-yellow-500 bg-yellow-50 dark:bg-yellow-900/20 animate-pulse"
-                )}
-              >
-                <div className="text-center mb-4">
-                  <div className="w-16 h-16 mx-auto mb-3 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center">
-                    <span className="text-2xl font-bold text-gray-600 dark:text-gray-300">
-                      {activeLegs[0].contact.firstName?.[0]}{activeLegs[0].contact.lastName?.[0]}
-                    </span>
-                  </div>
-                  <h3 className="text-xl font-semibold">
-                    {activeLegs[0].contact.firstName} {activeLegs[0].contact.lastName}
-                  </h3>
-                  <p className="text-gray-500">
-                    {formatPhoneNumberForDisplay(activeLegs[0].toNumber)}
-                  </p>
-                  {/* AMD Status Indicator */}
-                  {activeLegs[0].status === 'amd_checking' && (
-                    <p className="text-cyan-600 text-sm mt-2 flex items-center justify-center gap-1">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      Detecting voicemail...
-                    </p>
-                  )}
-                  {activeLegs[0].status === 'voicemail' && (
-                    <p className="text-purple-600 text-sm mt-2 font-medium">
-                      📞 Voicemail Detected - Skipping
-                    </p>
-                  )}
-                  {activeLegs[0].status === 'human_detected' && (
-                    <p className="text-green-600 text-sm mt-2 font-medium">
-                      ✓ Human Detected - Connecting...
-                    </p>
-                  )}
-                </div>
+          <CardContent className="flex-1 min-h-0 overflow-auto p-4">
+            {/* Guard check: Only render valid legs to prevent crashes */}
+            {getValidActiveLegs().length > 0 ? (
+              <div className={cn(
+                "grid gap-3",
+                getValidActiveLegs().length === 1 ? "grid-cols-1" :
+                getValidActiveLegs().length <= 4 ? "grid-cols-2" : "grid-cols-3"
+              )}>
+                {getValidActiveLegs().map((leg) => {
+                  // Double-check leg validity before rendering
+                  if (!isValidLeg(leg)) return null
 
-                <div className="flex items-center justify-center gap-4 text-sm text-gray-500">
-                  <span>From: {formatPhoneNumberForDisplay(activeLegs[0].fromNumber)}</span>
-                  {activeLegs[0].answeredAt && (
-                    <span className="flex items-center gap-1 text-green-600 font-medium">
-                      <Clock className="h-4 w-4" />
-                      {formatTime(Math.floor((Date.now() - activeLegs[0].answeredAt) / 1000))}
-                    </span>
-                  )}
-                </div>
+                  const statusInfo = getLegStatusInfo(leg.status)
+                  const isAnswered = leg.status === 'answered'
+                  const isHumanDetected = leg.status === 'human_detected'
+                  const isActiveCall = isAnswered || isHumanDetected
+                  // Grey out other calls when one is answered
+                  const isGreyedOut = hasAnsweredCall && !isActiveCall
 
-                {activeLegs[0].status === 'answered' && (
-                  <div className="mt-4 flex justify-center">
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={async () => {
-                        const { rtcClient } = await import('@/lib/webrtc/rtc-client')
-                        await rtcClient.hangup()
-                      }}
+                  return (
+                    <div
+                      key={leg.id}
+                      className={cn(
+                        "p-4 rounded-xl border-2 transition-all relative",
+                        // Connected call - prominent green styling
+                        isAnswered && "border-green-500 bg-green-50 dark:bg-green-900/30 ring-2 ring-green-500/50 shadow-lg shadow-green-500/20 scale-[1.02]",
+                        // Human detected - pulsing green
+                        isHumanDetected && !isAnswered && "border-green-400 bg-green-50 dark:bg-green-900/20 animate-pulse",
+                        // AMD checking - cyan pulsing
+                        leg.status === 'amd_checking' && !isGreyedOut && "border-cyan-500 bg-cyan-50 dark:bg-cyan-900/20 animate-pulse",
+                        // Voicemail - purple
+                        leg.status === 'voicemail' && "border-purple-500 bg-purple-50 dark:bg-purple-900/20",
+                        // Ringing/initiated - yellow pulsing
+                        ['ringing', 'initiated'].includes(leg.status) && !isGreyedOut && "border-yellow-500 bg-yellow-50 dark:bg-yellow-900/20 animate-pulse",
+                        // Greyed out when another call is answered
+                        isGreyedOut && "border-gray-300 bg-gray-100 dark:bg-gray-800/50 opacity-50"
+                      )}
                     >
-                      <PhoneOff className="h-4 w-4 mr-2" />
-                      End Call
-                    </Button>
-                  </div>
-                )}
+                      {/* Connected indicator ribbon */}
+                      {isAnswered && (
+                        <div className="absolute -top-1 -right-1 bg-green-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow">
+                          LIVE
+                        </div>
+                      )}
+
+                      <div className="text-center">
+                        {/* Avatar */}
+                        <div className={cn(
+                          "mx-auto mb-2 rounded-full flex items-center justify-center transition-all",
+                          isAnswered ? "bg-green-200 dark:bg-green-700" : "bg-gray-200 dark:bg-gray-700",
+                          activeLegs.length === 1 ? "w-16 h-16" : "w-10 h-10",
+                          isGreyedOut && "grayscale"
+                        )}>
+                          <span className={cn(
+                            "font-bold",
+                            isAnswered ? "text-green-700 dark:text-green-200" : "text-gray-600 dark:text-gray-300",
+                            activeLegs.length === 1 ? "text-2xl" : "text-sm"
+                          )}>
+                            {leg.contact.firstName?.[0]}{leg.contact.lastName?.[0]}
+                          </span>
+                        </div>
+
+                        {/* Name */}
+                        <h3 className={cn(
+                          "font-semibold truncate",
+                          activeLegs.length === 1 ? "text-xl" : "text-sm",
+                          isGreyedOut && "text-gray-400"
+                        )}>
+                          {leg.contact.firstName} {leg.contact.lastName}
+                        </h3>
+                        <p className={cn(
+                          "text-xs truncate",
+                          isGreyedOut ? "text-gray-400" : "text-gray-500"
+                        )}>
+                          {formatPhoneNumberForDisplay(leg.toNumber)}
+                        </p>
+
+                        {/* Status Badge - using consistent styling */}
+                        <div className="mt-2">
+                          <span className={cn(
+                            "inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium border",
+                            statusInfo.badge
+                          )}>
+                            {statusInfo.icon}
+                            {statusInfo.label}
+                          </span>
+                        </div>
+
+                        {/* Call duration for answered calls */}
+                        {isAnswered && leg.answeredAt && (
+                          <div className="mt-2 text-sm font-mono text-green-600 dark:text-green-400">
+                            {formatTime(Math.floor((Date.now() - leg.answeredAt) / 1000))}
+                          </div>
+                        )}
+
+                        {/* End Call button for connected call */}
+                        {isAnswered && (
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            className="mt-3"
+                            onClick={async () => {
+                              const { rtcClient } = await import('@/lib/webrtc/rtc-client')
+                              await rtcClient.hangup()
+                            }}
+                          >
+                            <PhoneOff className="h-3 w-3 mr-1" />
+                            End Call
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             ) : runState.status === 'idle' ? (
               <div className="text-center text-gray-500">
@@ -1459,7 +1711,20 @@ export default function MultiLineDialer({ onCallAnswered, onSessionComplete }: M
             </div>
           </CardHeader>
           <CardContent className="flex-1 min-h-0 overflow-hidden p-0">
-            <div ref={queueScrollRef} className="h-full overflow-y-auto">
+            {/* Queue scroll is frozen when a call is answered to keep agent focused */}
+            <div
+              ref={queueScrollRef}
+              className={cn(
+                "h-full transition-all",
+                hasAnsweredCall ? "overflow-hidden" : "overflow-y-auto"
+              )}
+            >
+              {/* Freeze indicator when call is connected */}
+              {hasAnsweredCall && (
+                <div className="sticky top-0 z-10 bg-green-500/90 text-white text-xs text-center py-1 font-medium">
+                  🔒 Queue frozen during active call
+                </div>
+              )}
               <div className="p-4 pt-0 space-y-1">
                 {queue.map((contact, idx) => (
                   <div

@@ -24,7 +24,7 @@ export type InboundCallInfo = {
 }
 
 class TelnyxWebRTCClient {
-  // VERSION: 2024-12-11-12:00 - RINGBACK TONE FIX
+  // VERSION: 2024-12-22-18:00 - REVERT TO SIMPLE AUDIO HANDLING
   private client: any | null = null
   private registered = false
   private currentCall: any | null = null
@@ -53,9 +53,11 @@ class TelnyxWebRTCClient {
   private powerDialerMode = false
   // Track multiple active calls for multi-line dialing
   private activeCalls = new Map<string, any>()
+  // Audio level monitoring
+  private audioMonitorInterval: NodeJS.Timeout | null = null
 
   constructor() {
-    console.log('[RTC] 🔧 WebRTC Client Version: 2024-12-08-11:00 - MULTI-LINE POWER DIALER')
+    console.log('[RTC] 🔧 WebRTC Client Version: 2024-12-22-18:00 - REVERT TO SIMPLE AUDIO')
   }
 
   /**
@@ -407,6 +409,333 @@ class TelnyxWebRTCClient {
     }
   }
 
+  // Ensure audio element exists for remote audio playback
+  private ensureAudioElement() {
+    if (this.audioEl || typeof document === 'undefined') return
+
+    // First check if there's already an audio element from a previous session
+    let el = document.getElementById('telnyx-remote-audio') as HTMLAudioElement
+    if (!el) {
+      el = document.createElement('audio')
+      el.id = 'telnyx-remote-audio'
+      document.body.appendChild(el)
+    }
+    el.autoplay = true
+    // @ts-ignore - playsInline exists in browsers
+    el.playsInline = true
+    // Don't hide the element - some browsers need it visible
+    el.style.position = 'fixed'
+    el.style.bottom = '0'
+    el.style.left = '0'
+    el.style.width = '1px'
+    el.style.height = '1px'
+    el.style.opacity = '0.01'
+    el.volume = 1.0
+    el.muted = false
+    // Add event listeners for debugging
+    el.addEventListener('loadedmetadata', () => {
+      console.log('[RTC] Audio element: metadata loaded')
+    })
+    el.addEventListener('canplay', () => {
+      console.log('[RTC] Audio element: can play')
+    })
+    el.addEventListener('playing', () => {
+      console.log('[RTC] Audio element: playing')
+      // Double-check volume is not muted
+      if (this.audioEl) {
+        console.log('[RTC] Audio state when playing: volume=', this.audioEl.volume, 'muted=', this.audioEl.muted)
+      }
+    })
+    el.addEventListener('error', (e) => {
+      console.error('[RTC] Audio element error:', e)
+    })
+    el.addEventListener('stalled', () => {
+      console.warn('[RTC] Audio element: stalled')
+    })
+    el.addEventListener('waiting', () => {
+      console.log('[RTC] Audio element: waiting for data')
+    })
+    this.audioEl = el
+    console.log('[RTC] ✓ Audio element created and configured')
+  }
+
+  // "Unlock" audio for the browser before any async audio operations
+  // This must be called from a user gesture (button click) to work
+  private async unlockAudio(): Promise<void> {
+    console.log('[RTC] 🔓 Unlocking audio context...')
+
+    // 1. Ensure audio element exists
+    this.ensureAudioElement()
+
+    // 2. Try to play the audio element (even with no source) to unlock it
+    if (this.audioEl) {
+      try {
+        // Create a tiny silent audio source and play it
+        const silentCtx = new AudioContext()
+        const oscillator = silentCtx.createOscillator()
+        oscillator.frequency.value = 0 // silent
+        oscillator.connect(silentCtx.destination)
+        oscillator.start(0)
+        oscillator.stop(silentCtx.currentTime + 0.001)
+
+        // Also try to resume any suspended AudioContext
+        if (silentCtx.state === 'suspended') {
+          await silentCtx.resume()
+        }
+
+        // Clean up
+        setTimeout(() => silentCtx.close(), 100)
+
+        console.log('[RTC] ✓ AudioContext unlocked')
+      } catch (e) {
+        console.warn('[RTC] Could not unlock AudioContext:', e)
+      }
+
+      // 3. Also try calling play() on the audio element to prime it
+      try {
+        // If there's no source, play() will fail but it "registers" the user gesture
+        await this.audioEl.play().catch(() => {
+          // Expected to fail with no source, but this registers intent
+        })
+        this.audioEl.pause() // stop immediately
+        console.log('[RTC] ✓ Audio element primed for playback')
+      } catch (e) {
+        // Ignore - the attempt is what matters
+      }
+    }
+  }
+
+  // Try to attach remote audio from current call or active calls
+  private tryAttachRemoteAudio() {
+    if (!this.audioEl) {
+      console.warn('[RTC] tryAttachRemoteAudio: No audio element')
+      return
+    }
+
+    // Try current call first
+    let remoteStream = this.currentCall?.remoteStream
+
+    // If no current call stream, try inbound call
+    if (!remoteStream && this.inboundCall) {
+      remoteStream = this.inboundCall.remoteStream
+    }
+
+    // If still no stream, try active calls
+    if (!remoteStream && this.activeCalls.size > 0) {
+      for (const call of this.activeCalls.values()) {
+        if (call?.remoteStream) {
+          remoteStream = call.remoteStream
+          break
+        }
+      }
+    }
+
+    if (!remoteStream) {
+      console.log('[RTC] tryAttachRemoteAudio: No remote stream available yet')
+      return
+    }
+
+    const audioTracks = remoteStream.getAudioTracks()
+    console.log('[RTC] tryAttachRemoteAudio: Found remote stream with', audioTracks.length, 'audio tracks')
+
+    if (audioTracks.length === 0) {
+      console.warn('[RTC] tryAttachRemoteAudio: Remote stream has no audio tracks')
+      return
+    }
+
+    // Check if already attached
+    // @ts-ignore
+    if (this.audioEl.srcObject === remoteStream) {
+      console.log('[RTC] tryAttachRemoteAudio: Already attached')
+      return
+    }
+
+    try {
+      // @ts-ignore
+      this.audioEl.srcObject = remoteStream
+      this.audioEl.volume = 1.0
+      this.audioEl.muted = false
+      this.audioEl.play().then(() => {
+        console.log('[RTC] ✓ tryAttachRemoteAudio: Audio playing')
+      }).catch((err) => {
+        if (err.name !== 'AbortError') {
+          console.error('[RTC] tryAttachRemoteAudio: Play failed:', err)
+        }
+      })
+    } catch (err) {
+      console.error('[RTC] tryAttachRemoteAudio: Error:', err)
+    }
+  }
+
+  // Attach remote audio from a specific call with enhanced debugging and peer connection handling
+  private attachRemoteAudioFromCall(call: any) {
+    if (!call) {
+      console.warn('[RTC] attachRemoteAudioFromCall: No call provided')
+      return
+    }
+
+    console.log('[RTC] attachRemoteAudioFromCall: Checking call object...')
+    console.log('[RTC] Call properties:', Object.keys(call))
+
+    // Try to get the peer connection from the call
+    const peer = call.peer || call.peerConnection || call._peerConnection || call.rtcPeerConnection
+    if (peer) {
+      console.log('[RTC] Found peer connection, checking receivers...')
+      try {
+        const receivers = peer.getReceivers()
+        console.log('[RTC] Peer has', receivers.length, 'receivers')
+        receivers.forEach((receiver: RTCRtpReceiver, i: number) => {
+          if (receiver.track?.kind === 'audio') {
+            console.log(`[RTC] Audio receiver ${i}: track.enabled=${receiver.track.enabled}, track.readyState=${receiver.track.readyState}`)
+          }
+        })
+      } catch (e) {
+        console.warn('[RTC] Could not inspect peer receivers:', e)
+      }
+    }
+
+    // Get remote stream from call
+    let remoteStream = call.remoteStream
+
+    // If no remoteStream, try to build one from the peer connection
+    if (!remoteStream && peer) {
+      try {
+        const receivers = peer.getReceivers()
+        const audioReceivers = receivers.filter((r: RTCRtpReceiver) => r.track?.kind === 'audio')
+        if (audioReceivers.length > 0) {
+          remoteStream = new MediaStream()
+          audioReceivers.forEach((r: RTCRtpReceiver) => {
+            if (r.track) {
+              remoteStream.addTrack(r.track)
+            }
+          })
+          console.log('[RTC] Built remote stream from peer receivers with', remoteStream.getAudioTracks().length, 'tracks')
+        }
+      } catch (e) {
+        console.warn('[RTC] Could not build stream from peer:', e)
+      }
+    }
+
+    if (!remoteStream) {
+      console.warn('[RTC] attachRemoteAudioFromCall: No remote stream available')
+      return
+    }
+
+    const audioTracks = remoteStream.getAudioTracks()
+    console.log('[RTC] Remote stream available, attaching...')
+    console.log('[RTC] Remote stream ID:', remoteStream.id)
+    console.log('[RTC] Remote audio tracks count:', audioTracks.length)
+
+    if (audioTracks.length === 0) {
+      console.warn('[RTC] Remote stream has no audio tracks!')
+      return
+    }
+
+    audioTracks.forEach((track: MediaStreamTrack, i: number) => {
+      console.log(`[RTC] Audio track ${i}: id=${track.id}, enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`)
+      // Force enable the track
+      if (!track.enabled) {
+        console.log('[RTC] Enabling disabled audio track...')
+        track.enabled = true
+      }
+    })
+
+    if (!this.audioEl) {
+      console.warn('[RTC] No audio element, creating one...')
+      this.ensureAudioElement()
+    }
+
+    if (!this.audioEl) {
+      console.error('[RTC] Failed to create audio element')
+      return
+    }
+
+    try {
+      // Clear any existing source
+      if (this.audioEl.srcObject) {
+        console.log('[RTC] Clearing existing srcObject...')
+        this.audioEl.pause()
+        this.audioEl.srcObject = null
+      }
+
+      // Attach the new stream
+      console.log('[RTC] Setting srcObject to remote stream...')
+      this.audioEl.srcObject = remoteStream
+      this.audioEl.volume = 1.0
+      this.audioEl.muted = false
+      this.audioEl.autoplay = true
+
+      // Try to set audio output device
+      if ('setSinkId' in this.audioEl) {
+        console.log('[RTC] setSinkId available, setting to default...')
+        try {
+          (this.audioEl as any).setSinkId('default').then(() => {
+            console.log('[RTC] ✓ Audio output set to default device')
+          }).catch((e: any) => {
+            console.warn('[RTC] Could not set sinkId:', e)
+          })
+        } catch (e) {
+          console.warn('[RTC] setSinkId error:', e)
+        }
+      }
+
+      // Play the audio
+      this.audioEl.play().then(() => {
+        console.log('[RTC] ✓ Remote audio playing (from attachRemoteAudioFromCall)')
+        console.log('[RTC] Audio element state: paused=', this.audioEl?.paused, 'volume=', this.audioEl?.volume, 'muted=', this.audioEl?.muted)
+
+        // Start monitoring audio levels
+        this.startAudioLevelMonitoring(remoteStream)
+      }).catch((err) => {
+        if (err.name === 'AbortError') {
+          console.log('[RTC] Audio play interrupted - this may be okay')
+        } else {
+          console.error('[RTC] Failed to play remote audio:', err)
+        }
+      })
+    } catch (err) {
+      console.error('[RTC] Error setting remote audio:', err)
+    }
+  }
+
+  // Monitor audio levels to verify audio is actually flowing
+  private startAudioLevelMonitoring(stream: MediaStream) {
+    // Stop any existing monitoring
+    if (this.audioMonitorInterval) {
+      clearInterval(this.audioMonitorInterval)
+    }
+
+    try {
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+      let checkCount = 0
+      const maxChecks = 10 // Check 10 times over 5 seconds
+
+      this.audioMonitorInterval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray)
+        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length
+
+        if (checkCount < 5) { // Only log first 5
+          console.log(`[RTC] Audio level: ${average.toFixed(2)} (should be > 0 if audio is flowing)`)
+        }
+
+        checkCount++
+        if (checkCount >= maxChecks) {
+          clearInterval(this.audioMonitorInterval!)
+          this.audioMonitorInterval = null
+          ctx.close()
+        }
+      }, 500)
+    } catch (e) {
+      console.warn('[RTC] Could not start audio level monitoring:', e)
+    }
+  }
+
   async ensureRegistered() {
     if (this.registered && this.client) return
 
@@ -436,33 +765,9 @@ class TelnyxWebRTCClient {
     })
     console.log("[RTC] ✓ Client created with realm:", sipDomain || 'sip.telnyx.com')
 
-    // Ensure an audio element exists to play remote media
-    if (!this.audioEl && typeof document !== 'undefined') {
-      const el = document.createElement('audio')
-      el.id = 'telnyx-remote-audio'
-      el.autoplay = true
-      // @ts-ignore - playsInline exists in browsers
-      el.playsInline = true
-      el.hidden = true
-      el.volume = 1.0
-      el.muted = false
-      // Add event listeners for debugging
-      el.addEventListener('loadedmetadata', () => {
-        console.log('[RTC] Audio element: metadata loaded')
-      })
-      el.addEventListener('canplay', () => {
-        console.log('[RTC] Audio element: can play')
-      })
-      el.addEventListener('playing', () => {
-        console.log('[RTC] Audio element: playing')
-      })
-      el.addEventListener('error', (e) => {
-        console.error('[RTC] Audio element error:', e)
-      })
-      document.body.appendChild(el)
-      this.audioEl = el
-      console.log('[RTC] ✓ Audio element created and configured')
-    }
+    // Use the proper ensureAudioElement() method which creates a "barely visible"
+    // audio element. Hidden elements cause issues in some browsers (Safari, Chrome).
+    this.ensureAudioElement()
 
     // Create ringtone using Web Audio API for inbound calls
     if (!this.ringtoneEl && typeof document !== 'undefined') {
@@ -532,6 +837,16 @@ class TelnyxWebRTCClient {
             callerName: callerName
           })
         }
+      }
+
+      // telnyx_rtc.media or telnyx_rtc.answer indicates media is ready
+      // This is a good time to ensure remote audio is attached
+      if (msg?.method === 'telnyx_rtc.media' || msg?.method === 'telnyx_rtc.answer') {
+        console.log('[RTC] 🔊 Media/Answer received, ensuring remote audio is attached')
+        // Give the SDK a moment to process the media
+        setTimeout(() => {
+          this.tryAttachRemoteAudio()
+        }, 200)
       }
     })
 
@@ -625,6 +940,20 @@ class TelnyxWebRTCClient {
           const remote = call.remoteStream
           if (remote && this.audioEl) {
             console.log('[RTC] Remote stream available in active state, attaching...')
+
+            // Log detailed stream info
+            const audioTracks = remote.getAudioTracks()
+            console.log('[RTC] 🔊 Audio tracks:', audioTracks.length)
+            audioTracks.forEach((track: MediaStreamTrack, i: number) => {
+              console.log(`[RTC] Track ${i}:`, {
+                enabled: track.enabled,
+                muted: track.muted,
+                readyState: track.readyState,
+                label: track.label,
+                id: track.id
+              })
+            })
+
             try {
               // @ts-ignore - srcObject exists in browsers
               this.audioEl.srcObject = remote
@@ -632,12 +961,10 @@ class TelnyxWebRTCClient {
               this.audioEl.muted = false
               this.audioEl.play().then(() => {
                 console.log('[RTC] ✓ Remote audio playing (from active state)')
+
+                // Start audio level monitoring to verify data is flowing
+                this.startAudioLevelMonitoring(remote)
               }).catch((err) => {
-                // AbortError is expected when a new audio source interrupts the previous one
-                if (err.name === 'AbortError') {
-                  console.log('[RTC] Audio play interrupted by new source - this is expected')
-                  return
-                }
                 console.error('[RTC] Failed to play remote audio:', err)
               })
             } catch (err) {
@@ -645,6 +972,16 @@ class TelnyxWebRTCClient {
             }
           } else {
             console.warn('[RTC] Remote stream not available in active state')
+            // Try to get stream from peer connection
+            if (call.peer || call.peerConnection || call._peerConnection) {
+              const pc = call.peer || call.peerConnection || call._peerConnection
+              console.log('[RTC] Trying to get stream from peer connection...')
+              const receivers = pc.getReceivers ? pc.getReceivers() : []
+              console.log('[RTC] Receivers:', receivers.length)
+              receivers.forEach((r: RTCRtpReceiver, i: number) => {
+                console.log(`[RTC] Receiver ${i}:`, r.track?.kind, r.track?.readyState)
+              })
+            }
           }
         }
 
@@ -737,13 +1074,25 @@ class TelnyxWebRTCClient {
     await this.ensureRegistered()
     if (!this.client) throw new Error("RTC client not ready")
 
+    // "Unlock" audio context and audio element BEFORE starting the call
+    // This prevents browser autoplay blocking on later async attaches
+    await this.unlockAudio()
+
     // Trigger mic permission explicitly (localhost is allowed without HTTPS)
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       })
+      console.log('[RTC] ✓ Microphone access granted for outbound call')
+      // Log microphone info
+      const audioTracks = stream.getAudioTracks()
+      console.log('[RTC] Local audio tracks:', audioTracks.length)
+      audioTracks.forEach((track, i) => {
+        console.log(`[RTC] Local track ${i}: label="${track.label}", enabled=${track.enabled}, muted=${track.muted}`)
+      })
     } catch (err) {
+      console.error('[RTC] ✗ Microphone access denied:', err)
       throw new Error("Microphone access denied or unavailable")
     }
     // Ensure tracks are enabled
@@ -800,6 +1149,58 @@ class TelnyxWebRTCClient {
         this.activeCalls.delete(callId)
       }, 30 * 60 * 1000)
     }
+
+    // Listen for when the outbound call becomes active and attach audio
+    // This is critical - we need to wait for the remote stream to be ready
+    // Extended retry window: 0.5s, 1s, 2s, 3s, 5s, 8s, 12s to handle slow media negotiation
+    let outboundAttached = false
+    const checkAndAttach = async () => {
+      if (outboundAttached) return // Already attached, don't re-attach
+
+      const remoteStream = call?.remoteStream
+      if (remoteStream && this.audioEl) {
+        const tracks = remoteStream.getAudioTracks()
+        // Only attach if we have actual audio tracks
+        if (tracks.length === 0) {
+          console.log('[RTC] Outbound call: Remote stream exists but no audio tracks yet, retrying...')
+          return
+        }
+
+        outboundAttached = true
+        console.log('[RTC] Outbound call: Remote stream ready, attaching audio...')
+        console.log('[RTC] Outbound call: Remote audio tracks:', tracks.length)
+        tracks.forEach((t: MediaStreamTrack, i: number) => {
+          console.log(`[RTC] Outbound track ${i}: enabled=${t.enabled}, muted=${t.muted}, readyState=${t.readyState}`)
+          // Force enable track
+          if (!t.enabled) {
+            t.enabled = true
+            console.log(`[RTC] Outbound track ${i}: Force enabled`)
+          }
+        })
+
+        // @ts-ignore
+        this.audioEl.srcObject = remoteStream
+        this.audioEl.volume = 1.0
+        this.audioEl.muted = false
+        try {
+          await this.audioEl.play()
+          console.log('[RTC] ✓ Outbound call: Remote audio playing')
+          // Start monitoring audio levels
+          this.startAudioLevelMonitoring(remoteStream)
+        } catch (err: any) {
+          if (err.name !== 'AbortError') {
+            console.error('[RTC] Outbound call: Failed to play audio:', err)
+          }
+        }
+      }
+    }
+
+    // Extended retry schedule: try at multiple intervals up to 12 seconds
+    // This handles slow media negotiation and late-arriving remoteStream
+    const retryDelays = [500, 1000, 2000, 3000, 5000, 8000, 12000]
+    retryDelays.forEach(delay => {
+      setTimeout(checkAndAttach, delay)
+    })
 
     return { sessionId: callId || Math.random().toString(36).slice(2) }
   }
@@ -1215,7 +1616,272 @@ class TelnyxWebRTCClient {
       return false
     }
   }
+  // Diagnostic function to help debug audio issues
+  diagnoseAudio(): void {
+    console.log('=== [RTC] AUDIO DIAGNOSTICS ===')
+    console.log('[RTC] Audio element exists:', !!this.audioEl)
+    if (this.audioEl) {
+      console.log('[RTC] Audio element properties:')
+      console.log('  - paused:', this.audioEl.paused)
+      console.log('  - volume:', this.audioEl.volume)
+      console.log('  - muted:', this.audioEl.muted)
+      console.log('  - currentTime:', this.audioEl.currentTime)
+      console.log('  - readyState:', this.audioEl.readyState)
+      console.log('  - networkState:', this.audioEl.networkState)
+      console.log('  - srcObject:', this.audioEl.srcObject ? 'set' : 'null')
+      if ('sinkId' in this.audioEl) {
+        console.log('  - sinkId:', (this.audioEl as any).sinkId || 'default')
+      }
+
+      const srcObj = this.audioEl.srcObject as MediaStream
+      if (srcObj) {
+        const tracks = srcObj.getAudioTracks()
+        console.log('[RTC] Remote stream audio tracks:', tracks.length)
+        tracks.forEach((track, i) => {
+          console.log(`  Track ${i}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`)
+          const settings = track.getSettings()
+          console.log(`  Track ${i} settings:`, JSON.stringify(settings))
+        })
+
+        // Measure audio level using Web Audio API
+        this.measureAudioLevel(srcObj)
+      }
+    }
+
+    console.log('[RTC] Current call exists:', !!this.currentCall)
+    if (this.currentCall) {
+      console.log('[RTC] Current call remoteStream:', !!this.currentCall.remoteStream)
+      console.log('[RTC] Current call peer connection:', !!this.currentCall.peer)
+      if (this.currentCall.remoteStream) {
+        const tracks = this.currentCall.remoteStream.getAudioTracks()
+        console.log('[RTC] Current call audio tracks:', tracks.length)
+        tracks.forEach((track: MediaStreamTrack, i: number) => {
+          console.log(`  Call Track ${i}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`)
+        })
+      }
+      // Check peer connection stats
+      if (this.currentCall.peer) {
+        this.logPeerConnectionStats(this.currentCall.peer)
+      }
+    }
+
+    console.log('[RTC] Active calls count:', this.activeCalls.size)
+    this.activeCalls.forEach((call, id) => {
+      console.log(`[RTC] Call ${id}: remoteStream=${!!call.remoteStream}`)
+    })
+
+    console.log('[RTC] Local stream exists:', !!this.localStream)
+    if (this.localStream) {
+      const tracks = this.localStream.getAudioTracks()
+      console.log('[RTC] Local stream audio tracks:', tracks.length)
+      tracks.forEach((track, i) => {
+        console.log(`  Local Track ${i}: enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`)
+      })
+    }
+
+    // List available audio output devices
+    this.listAudioDevices()
+
+    console.log('=== [RTC] END DIAGNOSTICS ===')
+  }
+
+  // Measure audio level using Web Audio API
+  private measureAudioLevel(stream: MediaStream): void {
+    try {
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+
+      // Take a few samples
+      let sampleCount = 0
+      const maxSamples = 5
+      const checkLevel = () => {
+        analyser.getByteFrequencyData(dataArray)
+        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length
+        console.log(`[RTC] Audio level sample ${sampleCount + 1}: ${average.toFixed(2)} (0-255 scale)`)
+        sampleCount++
+        if (sampleCount < maxSamples) {
+          setTimeout(checkLevel, 200)
+        } else {
+          ctx.close()
+          console.log('[RTC] Audio level check complete. If levels are 0, no audio data is flowing.')
+        }
+      }
+      checkLevel()
+    } catch (e) {
+      console.error('[RTC] Could not measure audio level:', e)
+    }
+  }
+
+  // Log peer connection stats
+  private async logPeerConnectionStats(peer: RTCPeerConnection): Promise<void> {
+    try {
+      const stats = await peer.getStats()
+      stats.forEach((report) => {
+        if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+          console.log('[RTC] Inbound audio RTP stats:', {
+            packetsReceived: report.packetsReceived,
+            bytesReceived: report.bytesReceived,
+            packetsLost: report.packetsLost,
+            jitter: report.jitter,
+          })
+        }
+        if (report.type === 'outbound-rtp' && report.kind === 'audio') {
+          console.log('[RTC] Outbound audio RTP stats:', {
+            packetsSent: report.packetsSent,
+            bytesSent: report.bytesSent,
+          })
+        }
+      })
+    } catch (e) {
+      console.error('[RTC] Could not get peer stats:', e)
+    }
+  }
+
+  // List available audio output devices
+  private async listAudioDevices(): Promise<void> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const audioOutputs = devices.filter(d => d.kind === 'audiooutput')
+      console.log('[RTC] Available audio output devices:')
+      audioOutputs.forEach((d, i) => {
+        console.log(`  ${i + 1}. ${d.label || 'Unknown'} (${d.deviceId})`)
+      })
+    } catch (e) {
+      console.error('[RTC] Could not enumerate devices:', e)
+    }
+  }
+
+  // Force refresh audio element with current call's remote stream
+  forceRefreshAudio(): boolean {
+    console.log('[RTC] Force refreshing audio...')
+
+    if (!this.audioEl) {
+      console.error('[RTC] No audio element to refresh')
+      return false
+    }
+
+    // Try current call first
+    let remoteStream = this.currentCall?.remoteStream
+
+    // If no current call stream, try to get from active calls
+    if (!remoteStream && this.activeCalls.size > 0) {
+      const firstCall = this.activeCalls.values().next().value
+      remoteStream = firstCall?.remoteStream
+      console.log('[RTC] Using stream from active call')
+    }
+
+    if (!remoteStream) {
+      console.error('[RTC] No remote stream available to refresh')
+      return false
+    }
+
+    try {
+      // Completely reset the audio element
+      this.audioEl.srcObject = null
+      this.audioEl.load()
+
+      // Re-attach after a brief delay
+      setTimeout(() => {
+        if (this.audioEl && remoteStream) {
+          // @ts-ignore
+          this.audioEl.srcObject = remoteStream
+          this.audioEl.volume = 1.0
+          this.audioEl.muted = false
+          this.audioEl.play().then(() => {
+            console.log('[RTC] ✓ Audio force refreshed successfully')
+            this.diagnoseAudio()
+          }).catch(err => {
+            console.error('[RTC] Force refresh play failed:', err)
+          })
+        }
+      }, 100)
+
+      return true
+    } catch (err) {
+      console.error('[RTC] Force refresh failed:', err)
+      return false
+    }
+  }
+
+  // Play a test tone to verify audio output is working
+  async playTestTone(): Promise<void> {
+    console.log('[RTC] Playing test tone...')
+    try {
+      const ctx = new AudioContext()
+      const oscillator = ctx.createOscillator()
+      const gainNode = ctx.createGain()
+
+      oscillator.connect(gainNode)
+      gainNode.connect(ctx.destination)
+
+      oscillator.frequency.value = 440 // A4 note
+      gainNode.gain.value = 0.3
+
+      oscillator.start()
+
+      setTimeout(() => {
+        oscillator.stop()
+        ctx.close()
+        console.log('[RTC] Test tone finished. If you heard it, your audio output is working.')
+      }, 1000)
+    } catch (e) {
+      console.error('[RTC] Could not play test tone:', e)
+    }
+  }
+
+  // Set audio output device
+  async setAudioOutputDevice(deviceId: string): Promise<boolean> {
+    if (!this.audioEl) {
+      console.error('[RTC] No audio element')
+      return false
+    }
+
+    if (!('setSinkId' in this.audioEl)) {
+      console.error('[RTC] setSinkId not supported in this browser')
+      return false
+    }
+
+    try {
+      await (this.audioEl as any).setSinkId(deviceId)
+      console.log('[RTC] ✓ Audio output device set to:', deviceId)
+      return true
+    } catch (e) {
+      console.error('[RTC] Could not set audio output device:', e)
+      return false
+    }
+  }
+
+  // Try all available audio output devices
+  async tryAllAudioDevices(): Promise<void> {
+    console.log('[RTC] Trying all audio output devices...')
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const audioOutputs = devices.filter(d => d.kind === 'audiooutput')
+
+      for (const device of audioOutputs) {
+        console.log(`[RTC] Trying device: ${device.label || device.deviceId}`)
+        const success = await this.setAudioOutputDevice(device.deviceId)
+        if (success) {
+          // Play test tone on this device
+          await this.playTestTone()
+          await new Promise(resolve => setTimeout(resolve, 1500))
+        }
+      }
+    } catch (e) {
+      console.error('[RTC] Error trying audio devices:', e)
+    }
+  }
 }
 
 export const rtcClient = new TelnyxWebRTCClient()
 
+// Expose rtcClient globally for debugging in browser console
+if (typeof window !== 'undefined') {
+  (window as any).rtcClient = rtcClient
+  console.log('[RTC] rtcClient exposed on window. Use window.rtcClient.diagnoseAudio() to debug audio issues.')
+}
