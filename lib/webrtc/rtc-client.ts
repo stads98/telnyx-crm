@@ -443,7 +443,15 @@ class TelnyxWebRTCClient {
       el.autoplay = true
       // @ts-ignore - playsInline exists in browsers
       el.playsInline = true
-      el.hidden = true
+      // Make element visible but tiny (some browsers have issues with hidden audio)
+      el.style.position = 'fixed'
+      el.style.bottom = '10px'
+      el.style.right = '10px'
+      el.style.width = '200px'
+      el.style.height = '40px'
+      el.style.zIndex = '9999'
+      el.style.border = '2px solid red'
+      el.controls = true // Show controls for debugging
       el.volume = 1.0
       el.muted = false
       // Add event listeners for debugging
@@ -455,9 +463,34 @@ class TelnyxWebRTCClient {
       })
       el.addEventListener('playing', () => {
         console.log('[RTC] Audio element: playing')
+        // Log detailed audio state
+        console.log('[RTC] Audio state:', {
+          volume: el.volume,
+          muted: el.muted,
+          paused: el.paused,
+          readyState: el.readyState,
+          networkState: el.networkState,
+          currentTime: el.currentTime,
+          duration: el.duration
+        })
+        // Check if srcObject has audio tracks
+        if (el.srcObject) {
+          const stream = el.srcObject as MediaStream
+          const audioTracks = stream.getAudioTracks()
+          console.log('[RTC] Audio tracks:', audioTracks.length, audioTracks.map(t => ({
+            id: t.id,
+            label: t.label,
+            enabled: t.enabled,
+            muted: t.muted,
+            readyState: t.readyState
+          })))
+        }
       })
       el.addEventListener('error', (e) => {
         console.error('[RTC] Audio element error:', e)
+      })
+      el.addEventListener('volumechange', () => {
+        console.log('[RTC] Volume changed:', el.volume, 'muted:', el.muted)
       })
       document.body.appendChild(el)
       this.audioEl = el
