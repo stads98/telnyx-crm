@@ -141,9 +141,8 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
       return null
     }
 
-    // IMPORTANT: Disable AMD for manual calls to keep outbound WebRTC as simple as possible.
-    // Power dialer / auto-dial flows still use AMD via their own APIs.
-    const useAMD = false
+    // Use AMD when there are already active calls (multi-line calling)
+    const useAMD = activeCount >= 1
 
     try {
       const { rtcClient } = await import('@/lib/webrtc/rtc-client')
@@ -300,8 +299,6 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
         startedAt: Date.now(),
         telnyxCall,
         amdEnabled: false,
-        // Track WebRTC session so hangUpCall can always target the exact call
-        webrtcSessionId: callId,
       }
 
       console.log('[MultiCall] Adding new call:', callId, 'Total will be:', activeCalls.size + 1)
@@ -378,7 +375,6 @@ export function MultiCallProvider({ children }: { children: React.ReactNode }) {
         status: 'ringing',
         startedAt: Date.now(),
         telnyxCall,
-        webrtcSessionId: callId,
       }
 
       console.log('[MultiCall] Restarting call:', callId)
