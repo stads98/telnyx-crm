@@ -801,6 +801,70 @@ class TelnyxWebRTCClient {
       }, 30 * 60 * 1000)
     }
 
+    // CRITICAL: Set up remote audio for outbound calls
+    // Wait a moment for the call to establish and remote stream to be available
+    console.log('[RTC] Setting up remote audio monitoring for outbound call...')
+    setTimeout(async () => {
+      const remoteStream = call?.remoteStream
+      console.log('[RTC] Outbound call: Checking for remote stream...', remoteStream ? 'Available' : 'Not available yet')
+
+      if (remoteStream && this.audioEl) {
+        try {
+          console.log('[RTC] Outbound call: Attaching remote audio stream')
+          // @ts-ignore - srcObject exists in browsers
+          this.audioEl.srcObject = remoteStream
+          this.audioEl.volume = 1.0
+          this.audioEl.muted = false
+          await this.audioEl.play()
+          console.log('[RTC] ✓ Outbound call: Remote audio playing')
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            console.log('[RTC] Audio play interrupted by new source - this is expected')
+          } else {
+            console.error('[RTC] Outbound call: Error setting up remote audio:', err)
+            // Try again without await
+            try {
+              this.audioEl.play().catch(e => {
+                if (e.name !== 'AbortError') {
+                  console.error('[RTC] Outbound audio play failed:', e)
+                }
+              })
+            } catch {}
+          }
+        }
+      } else {
+        console.warn('[RTC] Outbound call: Remote stream not available yet, setting up polling...')
+        // Set up a listener to catch it when it becomes available
+        let attempts = 0
+        const interval = setInterval(() => {
+          attempts++
+          const stream = call?.remoteStream
+          if (stream && this.audioEl) {
+            console.log('[RTC] Outbound call: Remote stream now available, attaching...')
+            try {
+              // @ts-ignore
+              this.audioEl.srcObject = stream
+              this.audioEl.volume = 1.0
+              this.audioEl.muted = false
+              this.audioEl.play().catch(e => {
+                if (e.name !== 'AbortError') {
+                  console.error('[RTC] Outbound delayed audio play failed:', e)
+                }
+              })
+              clearInterval(interval)
+            } catch (err) {
+              console.error('[RTC] Error in outbound delayed audio setup:', err)
+            }
+          }
+          // Stop trying after 10 attempts (5 seconds)
+          if (attempts >= 10) {
+            console.warn('[RTC] Outbound call: Gave up waiting for remote stream after 5 seconds')
+            clearInterval(interval)
+          }
+        }, 500)
+      }
+    }, 1000) // Wait 1 second for call to establish
+
     return { sessionId: callId || Math.random().toString(36).slice(2) }
   }
   getLocalStream(): MediaStream | null {
