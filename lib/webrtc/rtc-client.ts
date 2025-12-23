@@ -55,7 +55,73 @@ class TelnyxWebRTCClient {
   private activeCalls = new Map<string, any>()
 
   constructor() {
-    console.log('[RTC] 🔧 WebRTC Client Version: 2024-12-08-11:00 - MULTI-LINE POWER DIALER')
+    console.log('[RTC] 🔧 WebRTC Client Version: 2024-12-23-01:00 - OUTBOUND AUDIO FIX')
+  }
+
+  /**
+   * Ensure audio element exists for remote audio playback
+   * This method creates the audio element if it doesn't exist
+   */
+  private ensureAudioElement() {
+    if (this.audioEl || typeof document === 'undefined') return
+
+    const el = document.createElement('audio')
+    el.id = 'telnyx-remote-audio'
+    el.autoplay = true
+    // @ts-ignore - playsInline exists in browsers
+    el.playsInline = true
+    // Make element visible for debugging
+    el.style.position = 'fixed'
+    el.style.bottom = '10px'
+    el.style.right = '10px'
+    el.style.width = '200px'
+    el.style.height = '40px'
+    el.style.zIndex = '9999'
+    el.style.border = '2px solid red'
+    el.controls = true
+    el.volume = 1.0
+    el.muted = false
+
+    // Add event listeners for debugging
+    el.addEventListener('loadedmetadata', () => {
+      console.log('[RTC] Audio element: metadata loaded')
+    })
+    el.addEventListener('canplay', () => {
+      console.log('[RTC] Audio element: can play')
+    })
+    el.addEventListener('playing', () => {
+      console.log('[RTC] Audio element: playing')
+      console.log('[RTC] Audio state:', {
+        volume: el.volume,
+        muted: el.muted,
+        paused: el.paused,
+        readyState: el.readyState,
+        networkState: el.networkState,
+        currentTime: el.currentTime,
+        duration: el.duration
+      })
+      if (el.srcObject) {
+        const stream = el.srcObject as MediaStream
+        const audioTracks = stream.getAudioTracks()
+        console.log('[RTC] Audio tracks:', audioTracks.length, audioTracks.map(t => ({
+          id: t.id,
+          label: t.label,
+          enabled: t.enabled,
+          muted: t.muted,
+          readyState: t.readyState
+        })))
+      }
+    })
+    el.addEventListener('error', (e) => {
+      console.error('[RTC] Audio element error:', e)
+    })
+    el.addEventListener('volumechange', () => {
+      console.log('[RTC] Volume changed:', el.volume, 'muted:', el.muted)
+    })
+
+    document.body.appendChild(el)
+    this.audioEl = el
+    console.log('[RTC] ✓ Audio element created and configured')
   }
 
   /**
@@ -437,65 +503,7 @@ class TelnyxWebRTCClient {
     console.log("[RTC] ✓ Client created with realm:", sipDomain || 'sip.telnyx.com')
 
     // Ensure an audio element exists to play remote media
-    if (!this.audioEl && typeof document !== 'undefined') {
-      const el = document.createElement('audio')
-      el.id = 'telnyx-remote-audio'
-      el.autoplay = true
-      // @ts-ignore - playsInline exists in browsers
-      el.playsInline = true
-      // Make element visible but tiny (some browsers have issues with hidden audio)
-      el.style.position = 'fixed'
-      el.style.bottom = '10px'
-      el.style.right = '10px'
-      el.style.width = '200px'
-      el.style.height = '40px'
-      el.style.zIndex = '9999'
-      el.style.border = '2px solid red'
-      el.controls = true // Show controls for debugging
-      el.volume = 1.0
-      el.muted = false
-      // Add event listeners for debugging
-      el.addEventListener('loadedmetadata', () => {
-        console.log('[RTC] Audio element: metadata loaded')
-      })
-      el.addEventListener('canplay', () => {
-        console.log('[RTC] Audio element: can play')
-      })
-      el.addEventListener('playing', () => {
-        console.log('[RTC] Audio element: playing')
-        // Log detailed audio state
-        console.log('[RTC] Audio state:', {
-          volume: el.volume,
-          muted: el.muted,
-          paused: el.paused,
-          readyState: el.readyState,
-          networkState: el.networkState,
-          currentTime: el.currentTime,
-          duration: el.duration
-        })
-        // Check if srcObject has audio tracks
-        if (el.srcObject) {
-          const stream = el.srcObject as MediaStream
-          const audioTracks = stream.getAudioTracks()
-          console.log('[RTC] Audio tracks:', audioTracks.length, audioTracks.map(t => ({
-            id: t.id,
-            label: t.label,
-            enabled: t.enabled,
-            muted: t.muted,
-            readyState: t.readyState
-          })))
-        }
-      })
-      el.addEventListener('error', (e) => {
-        console.error('[RTC] Audio element error:', e)
-      })
-      el.addEventListener('volumechange', () => {
-        console.log('[RTC] Volume changed:', el.volume, 'muted:', el.muted)
-      })
-      document.body.appendChild(el)
-      this.audioEl = el
-      console.log('[RTC] ✓ Audio element created and configured')
-    }
+    this.ensureAudioElement()
 
     // Create ringtone using Web Audio API for inbound calls
     if (!this.ringtoneEl && typeof document !== 'undefined') {
@@ -800,11 +808,18 @@ class TelnyxWebRTCClient {
     // Mark that we're initiating an outbound call - prevents false inbound detection
     this.isInitiatingOutbound = true
 
+    // Ensure audio element exists for the SDK to use
+    this.ensureAudioElement()
+
+    console.log('[RTC] Creating outbound call with remoteElement:', this.audioEl?.id)
+
     const call = await this.client.newCall({
       destinationNumber: destination,
       callerNumber: opts.fromNumber,
       audio: true,
       video: false,
+      // Let SDK handle remote audio attachment directly
+      remoteElement: this.audioEl || undefined,
       // Hint the SDK to reuse our granted stream (ignored if unsupported)
       localStream: stream as any,
     })
