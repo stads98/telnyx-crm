@@ -24,7 +24,7 @@ export type InboundCallInfo = {
 }
 
 class TelnyxWebRTCClient {
-  // VERSION: 2024-12-11-12:00 - RINGBACK TONE FIX
+  // VERSION: 2024-12-23-02:00 - SIMPLIFIED AUDIO (client.remoteElement per Telnyx docs)
   private client: any | null = null
   private registered = false
   private currentCall: any | null = null
@@ -59,8 +59,8 @@ class TelnyxWebRTCClient {
   }
 
   /**
-   * Ensure audio element exists for remote audio playback
-   * This method creates the audio element if it doesn't exist
+   * Create audio element for remote media - SIMPLIFIED per Telnyx docs
+   * The SDK will handle attaching the remote stream when client.remoteElement is set
    */
   private ensureAudioElement() {
     if (this.audioEl || typeof document === 'undefined') return
@@ -70,58 +70,14 @@ class TelnyxWebRTCClient {
     el.autoplay = true
     // @ts-ignore - playsInline exists in browsers
     el.playsInline = true
-    // Make element visible for debugging
-    el.style.position = 'fixed'
-    el.style.bottom = '10px'
-    el.style.right = '10px'
-    el.style.width = '200px'
-    el.style.height = '40px'
-    el.style.zIndex = '9999'
-    el.style.border = '2px solid red'
-    el.controls = true
     el.volume = 1.0
     el.muted = false
-
-    // Add event listeners for debugging
-    el.addEventListener('loadedmetadata', () => {
-      console.log('[RTC] Audio element: metadata loaded')
-    })
-    el.addEventListener('canplay', () => {
-      console.log('[RTC] Audio element: can play')
-    })
-    el.addEventListener('playing', () => {
-      console.log('[RTC] Audio element: playing')
-      console.log('[RTC] Audio state:', {
-        volume: el.volume,
-        muted: el.muted,
-        paused: el.paused,
-        readyState: el.readyState,
-        networkState: el.networkState,
-        currentTime: el.currentTime,
-        duration: el.duration
-      })
-      if (el.srcObject) {
-        const stream = el.srcObject as MediaStream
-        const audioTracks = stream.getAudioTracks()
-        console.log('[RTC] Audio tracks:', audioTracks.length, audioTracks.map(t => ({
-          id: t.id,
-          label: t.label,
-          enabled: t.enabled,
-          muted: t.muted,
-          readyState: t.readyState
-        })))
-      }
-    })
-    el.addEventListener('error', (e) => {
-      console.error('[RTC] Audio element error:', e)
-    })
-    el.addEventListener('volumechange', () => {
-      console.log('[RTC] Volume changed:', el.volume, 'muted:', el.muted)
-    })
+    // Hidden - SDK handles everything
+    el.style.display = 'none'
 
     document.body.appendChild(el)
     this.audioEl = el
-    console.log('[RTC] ✓ Audio element created and configured')
+    console.log('[RTC] ✓ Audio element created (id: telnyx-remote-audio)')
   }
 
   /**
@@ -505,6 +461,15 @@ class TelnyxWebRTCClient {
     // Ensure an audio element exists to play remote media
     this.ensureAudioElement()
 
+    // CRITICAL: Set remoteElement on the CLIENT instance per Telnyx docs
+    // This tells the SDK to automatically attach remote audio to this element
+    // See: https://developers.telnyx.com/development/webrtc/js-sdk/quickstart
+    if (this.audioEl) {
+      // @ts-ignore - remoteElement exists on TelnyxRTC client
+      this.client.remoteElement = this.audioEl.id
+      console.log('[RTC] ✓ Set client.remoteElement =', this.audioEl.id)
+    }
+
     // Create ringtone using Web Audio API for inbound calls
     if (!this.ringtoneEl && typeof document !== 'undefined') {
       // Create a synthetic ringtone using Web Audio API
@@ -808,25 +773,15 @@ class TelnyxWebRTCClient {
     // Mark that we're initiating an outbound call - prevents false inbound detection
     this.isInitiatingOutbound = true
 
-    // Ensure audio element exists for the SDK to use
-    this.ensureAudioElement()
-
-    console.log('[RTC] Creating outbound call with remoteElement:', this.audioEl?.id)
+    // SIMPLIFIED: SDK handles remote audio via client.remoteElement set during init
+    console.log('[RTC] Creating outbound call...')
 
     const call = await this.client.newCall({
       destinationNumber: destination,
       callerNumber: opts.fromNumber,
       audio: true,
       video: false,
-      // Let SDK handle remote audio attachment directly
-      remoteElement: this.audioEl || undefined,
-      // Hint the SDK to reuse our granted stream (ignored if unsupported)
-      localStream: stream as any,
     })
-    // Some SDK builds expose setLocalStream; attach proactively if present
-    if ((call as any)?.setLocalStream) {
-      try { (call as any).setLocalStream(stream) } catch {}
-    }
     this.currentCall = call
 
     // Start playing ringback tone for outbound call
@@ -849,70 +804,7 @@ class TelnyxWebRTCClient {
       }, 30 * 60 * 1000)
     }
 
-    // CRITICAL: Set up remote audio for outbound calls
-    // Wait a moment for the call to establish and remote stream to be available
-    console.log('[RTC] Setting up remote audio monitoring for outbound call...')
-    setTimeout(async () => {
-      const remoteStream = call?.remoteStream
-      console.log('[RTC] Outbound call: Checking for remote stream...', remoteStream ? 'Available' : 'Not available yet')
-
-      if (remoteStream && this.audioEl) {
-        try {
-          console.log('[RTC] Outbound call: Attaching remote audio stream')
-          // @ts-ignore - srcObject exists in browsers
-          this.audioEl.srcObject = remoteStream
-          this.audioEl.volume = 1.0
-          this.audioEl.muted = false
-          await this.audioEl.play()
-          console.log('[RTC] ✓ Outbound call: Remote audio playing')
-        } catch (err: any) {
-          if (err.name === 'AbortError') {
-            console.log('[RTC] Audio play interrupted by new source - this is expected')
-          } else {
-            console.error('[RTC] Outbound call: Error setting up remote audio:', err)
-            // Try again without await
-            try {
-              this.audioEl.play().catch(e => {
-                if (e.name !== 'AbortError') {
-                  console.error('[RTC] Outbound audio play failed:', e)
-                }
-              })
-            } catch {}
-          }
-        }
-      } else {
-        console.warn('[RTC] Outbound call: Remote stream not available yet, setting up polling...')
-        // Set up a listener to catch it when it becomes available
-        let attempts = 0
-        const interval = setInterval(() => {
-          attempts++
-          const stream = call?.remoteStream
-          if (stream && this.audioEl) {
-            console.log('[RTC] Outbound call: Remote stream now available, attaching...')
-            try {
-              // @ts-ignore
-              this.audioEl.srcObject = stream
-              this.audioEl.volume = 1.0
-              this.audioEl.muted = false
-              this.audioEl.play().catch(e => {
-                if (e.name !== 'AbortError') {
-                  console.error('[RTC] Outbound delayed audio play failed:', e)
-                }
-              })
-              clearInterval(interval)
-            } catch (err) {
-              console.error('[RTC] Error in outbound delayed audio setup:', err)
-            }
-          }
-          // Stop trying after 10 attempts (5 seconds)
-          if (attempts >= 10) {
-            console.warn('[RTC] Outbound call: Gave up waiting for remote stream after 5 seconds')
-            clearInterval(interval)
-          }
-        }, 500)
-      }
-    }, 1000) // Wait 1 second for call to establish
-
+    console.log('[RTC] ✓ Outbound call created, callId:', callId)
     return { sessionId: callId || Math.random().toString(36).slice(2) }
   }
   getLocalStream(): MediaStream | null {
